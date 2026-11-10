@@ -3,7 +3,14 @@
 export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
 
 WASI_VER=32
-WASI_SDK=wasi-sdk-${WASI_VER}.0-arm64-macos
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) WASI_HOST=arm64-macos ;;
+  Darwin-x86_64) WASI_HOST=x86_64-macos ;;
+  Linux-x86_64) WASI_HOST=x86_64-linux ;;
+  Linux-aarch64) WASI_HOST=arm64-linux ;;
+  *) echo "unsupported host" >&2; exit 1 ;;
+esac
+WASI_SDK=wasi-sdk-${WASI_VER}.0-${WASI_HOST}
 WASI_SDK_URL=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_VER}/${WASI_SDK}.tar.gz
 if ! [ -d ${WASI_SDK} ]; then curl -L ${WASI_SDK_URL} | tar xzf -; fi
 WASI_SDK_PATH=$(pwd)/${WASI_SDK}

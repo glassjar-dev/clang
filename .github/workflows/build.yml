@@ -1,0 +1,43 @@
+name: Build llvm.core.wasm
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ninja-build ccache cmake
+
+      - name: Fetch pinned wasi-sdk and Binaryen
+        run: |
+          curl -sSLo wasi-sdk.tar.gz https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-32/wasi-sdk-32.0-x86_64-linux.tar.gz
+          echo "55fc523ebfbc98f69d1034fcfcb83d1ff5610cd9ab7eceef6cd097a30ba4ef93  wasi-sdk.tar.gz" | sha256sum -c
+          tar xzf wasi-sdk.tar.gz
+          curl -sSLo binaryen.tar.gz https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
+          echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  binaryen.tar.gz" | sha256sum -c
+          tar xzf binaryen.tar.gz
+          echo "$PWD/binaryen-version_133/bin" >> "$GITHUB_PATH"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ hashFiles('build-variant.sh', 'build-glassjar.sh', 'patches/*') }}-${{ github.sha }}
+          restore-keys: ccache-
+
+      - name: Build
+        run: ./build-glassjar.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: llvm.core.wasm
+          path: dist/

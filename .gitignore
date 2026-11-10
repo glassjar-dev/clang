@@ -1,6 +1,11 @@
-/wasi-sdk-*.*
-*.wasm
-
-/*-build
-/*-prefix
-/Toolchain-WASI*.cmake
+wasi-sdk-*/
+llvm-tblgen-build/
+llvm-build/
+build-*/
+variants/
+dist/
+harness/work/
+harness/prof/
+*.log
+link-cmd.txt
+link-named*.sh
