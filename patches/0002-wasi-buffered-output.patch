@@ -1,0 +1,38 @@
+diff --git a/llvm/lib/Support/VirtualOutputBackends.cpp b/llvm/lib/Support/VirtualOutputBackends.cpp
+index d7a91dfa14..e3d7c20e5e 100644
+--- a/llvm/lib/Support/VirtualOutputBackends.cpp
++++ b/llvm/lib/Support/VirtualOutputBackends.cpp
+@@ -361,8 +361,16 @@ Error OnDiskOutputFile::initializeStream() {
+   }
+ 
+   // Buffer the stream if necessary.
++#ifdef __wasi__
++  // glassjar: every write and seek is a call out of the sandbox, and object
++  // writers patch sizes by seeking back, so keep binary output in memory and
++  // write it once on close.
++  if (!Config.getText())
++    BufferOS.emplace(*FileOS);
++#else
+   if (!FileOS->supportsSeeking() && !Config.getText())
+     BufferOS.emplace(*FileOS);
++#endif
+ 
+   return Error::success();
+ }
+diff --git a/llvm/lib/Support/raw_ostream.cpp b/llvm/lib/Support/raw_ostream.cpp
+index fe07aed335..7c59d0aa37 100644
+--- a/llvm/lib/Support/raw_ostream.cpp
++++ b/llvm/lib/Support/raw_ostream.cpp
+@@ -851,6 +851,12 @@ size_t raw_fd_ostream::preferred_buffer_size() const {
+   // the complexity.
+   if (S_ISCHR(statbuf.st_mode) && is_displayed())
+     return 0;
++#ifdef __wasi__
++  // glassjar: WASI has no block size, so wasi-libc reports 0, which would leave
++  // the stream unbuffered and turn every small write into a host call.
++  if (statbuf.st_blksize == 0)
++    return 64 * 1024;
++#endif
+   // Return the preferred block size.
+   return statbuf.st_blksize;
+ #endif

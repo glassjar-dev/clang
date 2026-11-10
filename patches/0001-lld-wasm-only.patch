@@ -1,0 +1,65 @@
+diff --git a/lld/tools/lld/CMakeLists.txt b/lld/tools/lld/CMakeLists.txt
+index 8498a91597..b3dc359d2d 100644
+--- a/lld/tools/lld/CMakeLists.txt
++++ b/lld/tools/lld/CMakeLists.txt
+@@ -24,6 +24,11 @@ function(lld_target_link_libraries target type)
+   target_link_libraries(${target} ${type} ${ARGN})
+ endfunction()
+ 
++option(LLD_WASM_ONLY "Link only the WebAssembly linker (wasm-ld)" OFF)
++if(LLD_WASM_ONLY)
++  lld_target_link_libraries(lld PRIVATE lldCommon lldWasm)
++  set_source_files_properties(lld.cpp PROPERTIES COMPILE_DEFINITIONS LLD_WASM_ONLY)
++else()
+ lld_target_link_libraries(lld
+   PRIVATE
+   lldCommon
+@@ -33,6 +38,7 @@ lld_target_link_libraries(lld
+   lldMinGW
+   lldWasm
+   )
++endif()
+ 
+ if(NOT LLD_SYMLINKS_TO_CREATE)
+   set(LLD_SYMLINKS_TO_CREATE
+diff --git a/lld/tools/lld/lld.cpp b/lld/tools/lld/lld.cpp
+index d6800fa1ee..181d74bc97 100644
+--- a/lld/tools/lld/lld.cpp
++++ b/lld/tools/lld/lld.cpp
+@@ -66,11 +66,18 @@ static unsigned inTestVerbosity() {
+   return v;
+ }
+ 
++#ifdef LLD_WASM_ONLY
++// glassjar: a browser toolchain that only links WebAssembly carries only wasm-ld.
++LLD_HAS_DRIVER(wasm)
++#define LLD_LINKED_DRIVERS {{lld::Wasm, &lld::wasm::link}}
++#else
+ LLD_HAS_DRIVER(coff)
+ LLD_HAS_DRIVER(elf)
+ LLD_HAS_DRIVER(mingw)
+ LLD_HAS_DRIVER(macho)
+ LLD_HAS_DRIVER(wasm)
++#define LLD_LINKED_DRIVERS LLD_ALL_DRIVERS
++#endif
+ 
+ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
+   sys::Process::UseANSIEscapeCodes(true);
+@@ -87,7 +94,7 @@ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
+   // exception handling and no memory cleanup on exit.
+   if (!inTestVerbosity()) {
+     int r =
+-        lld::unsafeLldMain(args, llvm::outs(), llvm::errs(), LLD_ALL_DRIVERS,
++        lld::unsafeLldMain(args, llvm::outs(), llvm::errs(), LLD_LINKED_DRIVERS,
+                            /*exitEarly=*/true);
+     return r;
+   }
+@@ -100,7 +107,7 @@ int lld_main(int argc, char **argv, const llvm::ToolContext &) {
+     inTestOutputDisabled = (i != 1);
+ 
+     // Execute one iteration.
+-    auto r = lldMain(args, llvm::outs(), llvm::errs(), LLD_ALL_DRIVERS);
++    auto r = lldMain(args, llvm::outs(), llvm::errs(), LLD_LINKED_DRIVERS);
+     if (!r.canRunAgain)
+       exitLld(r.retCode); // Exit now, can't re-execute again.
+ 
