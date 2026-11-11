@@ -20,6 +20,8 @@ const keep = process.argv.includes('--keep');
 const sysroot = process.env.SYSROOT ?? resolve(here, '../../debugger.sh-coldstart/node_modules/.cache/cs106b-toolchain/sysroot');
 const dapTests = process.env.DAP_TESTS ?? resolve(here, '../../engine/tools/dap/tests');
 const work = resolve(here, 'work');
+const profileDir = process.env.PROFILE_DIR && resolve(process.env.PROFILE_DIR);
+if (profileDir) mkdirSync(profileDir, { recursive: true });
 if (!referencePath || !candidatePath) throw new Error('usage: node compare.mjs <reference.wasm> <candidate.wasm>');
 if (!existsSync(join(sysroot, 'include/c++/v1'))) throw new Error(`No sysroot at ${sysroot}`);
 
@@ -127,7 +129,9 @@ async function runAll(compilerPath, root) {
     writeFileSync(join(root, 'student.cpp'), name.includes('completion') ? STUDENT : STUDENT.replace('  words.\n', '  // words.\n'));
     const out = join(root, 'stdout'), err = join(root, 'stderr');
     const stdout = openSync(out, 'w'), stderr = openSync(err, 'w');
-    const wasi = new WASI({ version: 'preview1', args: argv, env: {}, preopens: { '/': root }, returnOnExit: true, stdout, stderr });
+    // PROFILE_DIR: an instrumented (-fprofile-generate) compiler writes one raw profile per job there.
+    const env = profileDir ? { LLVM_PROFILE_FILE: `/profraw/${basename(root)}-${results.length}.profraw` } : {};
+    const wasi = new WASI({ version: 'preview1', args: argv, env, preopens: { '/': root, ...(profileDir ? { '/profraw': profileDir } : {}) }, returnOnExit: true, stdout, stderr });
     const started = performance.now();
     const instance = await WebAssembly.instantiate(module, wasi.getImportObject());
     let code;
