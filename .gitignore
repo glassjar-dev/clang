@@ -9,3 +9,5 @@ harness/prof/
 *.log
 link-cmd.txt
 link-named*.sh
+glassjar.profdata
+profraw/

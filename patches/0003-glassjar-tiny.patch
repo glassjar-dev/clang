@@ -1,0 +1,2615 @@
+diff --git a/clang/include/clang/AST/DeclBase.h b/clang/include/clang/AST/DeclBase.h
+index 5519787d71..68dd259972 100644
+--- a/clang/include/clang/AST/DeclBase.h
++++ b/clang/include/clang/AST/DeclBase.h
+@@ -96,6 +96,31 @@ public:
+ #include "clang/AST/DeclNodes.inc"
+   };
+ 
++  /// glassjar: declaration kinds only Objective-C, OpenMP, OpenACC, blocks,
++  /// HLSL or SYCL code can produce (see Stmt::glassjarNeverBuilt).
++  static constexpr bool glassjarNeverBuilt(Kind K) {
++#ifdef GLASSJAR_TINY
++    switch (K) {
++    case ObjCTypeParam: case OMPDeclareReduction: case OMPDeclareMapper:
++    case ObjCIvar: case ObjCAtDefsField: case OMPCapturedExpr: case ObjCMethod:
++    case ObjCCategory: case ObjCProtocol: case ObjCInterface:
++    case ObjCCategoryImpl: case ObjCImplementation: case ObjCProperty:
++    case ObjCCompatibleAlias: case ObjCPropertyImpl: case Block:
++    case OutlinedFunction: case OMPThreadPrivate: case OMPGroupPrivate:
++    case OMPAllocate: case OMPRequires: case HLSLBuffer:
++    case HLSLRootSignature: case OpenACCDeclare: case OpenACCRoutine:
++      return true;
++    default:
++      return false;
++    }
++#else
++    return false;
++#endif
++  }
++#define GLASSJAR_NEVER_BUILT_DECL(KIND)                                        \
++  if (::clang::Decl::glassjarNeverBuilt(::clang::Decl::KIND))                  \
++    __builtin_unreachable();
++
+   /// A placeholder type used to construct an empty shell of a
+   /// decl-derived type that will be filled in later (e.g., by some
+   /// deserialization method).
+@@ -396,6 +421,8 @@ protected:
+         TopLevelDeclInObjCContainer(false), Access(AS_none), FromASTFile(0),
+         IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
+         CacheValidAndLinkage(llvm::to_underlying(Linkage::Invalid)) {
++    if (glassjarNeverBuilt(DK))
++      __builtin_trap();
+     if (StatisticsEnabled) add(DK);
+   }
+ 
+@@ -405,6 +432,8 @@ protected:
+         Access(AS_none), FromASTFile(0),
+         IdentifierNamespace(getIdentifierNamespaceForKind(DK)),
+         CacheValidAndLinkage(llvm::to_underlying(Linkage::Invalid)) {
++    if (glassjarNeverBuilt(DK))
++      __builtin_trap();
+     if (StatisticsEnabled) add(DK);
+   }
+ 
+diff --git a/clang/include/clang/AST/DeclVisitor.h b/clang/include/clang/AST/DeclVisitor.h
+index 8b7c30ee40..5fcc7de5b7 100644
+--- a/clang/include/clang/AST/DeclVisitor.h
++++ b/clang/include/clang/AST/DeclVisitor.h
+@@ -38,7 +38,9 @@ public:
+   RetTy Visit(PTR(Decl) D) {
+     switch (D->getKind()) {
+ #define DECL(DERIVED, BASE) \
+-      case Decl::DERIVED: DISPATCH(DERIVED##Decl, DERIVED##Decl);
++      case Decl::DERIVED:                                                      \
++        GLASSJAR_NEVER_BUILT_DECL(DERIVED)                                     \
++        DISPATCH(DERIVED##Decl, DERIVED##Decl);
+ #define ABSTRACT_DECL(DECL)
+ #include "clang/AST/DeclNodes.inc"
+     }
+diff --git a/clang/include/clang/AST/RecursiveASTVisitor.h b/clang/include/clang/AST/RecursiveASTVisitor.h
+index ddec2c52fb..3fd2886bac 100644
+--- a/clang/include/clang/AST/RecursiveASTVisitor.h
++++ b/clang/include/clang/AST/RecursiveASTVisitor.h
+@@ -569,6 +569,7 @@ bool RecursiveASTVisitor<Derived>::dataTraverseNode(Stmt *S,
+ #define ABSTRACT_STMT(STMT)
+ #define STMT(CLASS, PARENT)                                                    \
+   case Stmt::CLASS##Class:                                                     \
++    GLASSJAR_NEVER_BUILT_STMT(CLASS)                                           \
+     return TRAVERSE_STMT_BASE(CLASS, CLASS, S, Queue);
+ #include "clang/AST/StmtNodes.inc"
+   }
+@@ -636,6 +637,7 @@ bool RecursiveASTVisitor<Derived>::PostVisitStmt(Stmt *S) {
+ #define ABSTRACT_STMT(STMT)
+ #define STMT(CLASS, PARENT)                                                    \
+   case Stmt::CLASS##Class:                                                     \
++    GLASSJAR_NEVER_BUILT_STMT(CLASS)                                           \
+     if (::clang::detail::isSameMethod(&RecursiveASTVisitor::Traverse##CLASS,   \
+                                       &Derived::Traverse##CLASS)) {            \
+       TRY_TO(WalkUpFrom##CLASS(static_cast<CLASS *>(S)));                      \
+@@ -779,6 +781,7 @@ bool RecursiveASTVisitor<Derived>::TraverseDecl(Decl *D) {
+ #define ABSTRACT_DECL(DECL)
+ #define DECL(CLASS, BASE)                                                      \
+   case Decl::CLASS:                                                            \
++    GLASSJAR_NEVER_BUILT_DECL(CLASS)                                           \
+     if (!getDerived().Traverse##CLASS##Decl(static_cast<CLASS##Decl *>(D)))    \
+       return false;                                                            \
+     break;
+diff --git a/clang/include/clang/AST/Stmt.h b/clang/include/clang/AST/Stmt.h
+index 1008e7d66e..284f91aaeb 100644
+--- a/clang/include/clang/AST/Stmt.h
++++ b/clang/include/clang/AST/Stmt.h
+@@ -95,6 +95,45 @@ public:
+ #include "clang/AST/StmtNodes.inc"
+   };
+ 
++  /// glassjar: statement and expression kinds that only Objective-C, OpenMP,
++  /// OpenACC, blocks, CUDA, HLSL or SYCL code can produce. A C/C++-only build
++  /// (GLASSJAR_TINY) traps if one is ever constructed, so every dispatch on
++  /// the node kind can treat these cases as unreachable and LTO drops the
++  /// code behind them.
++  static constexpr bool glassjarNeverBuilt(StmtClass C) {
++#ifdef GLASSJAR_TINY
++    switch (C) {
++    case ObjCAtTryStmtClass: case ObjCAtCatchStmtClass:
++    case ObjCAtFinallyStmtClass: case ObjCAtThrowStmtClass:
++    case ObjCAtSynchronizedStmtClass: case ObjCForCollectionStmtClass:
++    case ObjCAutoreleasePoolStmtClass: case ObjCStringLiteralClass:
++    case ObjCBoxedExprClass: case ObjCArrayLiteralClass:
++    case ObjCDictionaryLiteralClass: case ObjCEncodeExprClass:
++    case ObjCMessageExprClass: case ObjCSelectorExprClass:
++    case ObjCProtocolExprClass: case ObjCIvarRefExprClass:
++    case ObjCPropertyRefExprClass: case ObjCIsaExprClass:
++    case ObjCIndirectCopyRestoreExprClass: case ObjCBoolLiteralExprClass:
++    case ObjCSubscriptRefExprClass: case ObjCBridgedCastExprClass:
++    case BlockExprClass: case ArraySectionExprClass: case OMPIteratorExprClass:
++    case OMPArrayShapingExprClass: case OMPCanonicalLoopClass:
++    case OpenACCAsteriskSizeExprClass: case CUDAKernelCallExprClass:
++    case HLSLOutArgExprClass: case SYCLUniqueStableNameExprClass:
++    case SYCLKernelCallStmtClass:
++      return true;
++    default:
++      return (C >= firstOMPExecutableDirectiveConstant &&
++              C <= lastOMPExecutableDirectiveConstant) ||
++             (C >= firstOpenACCConstructStmtConstant &&
++              C <= lastOpenACCConstructStmtConstant);
++    }
++#else
++    return false;
++#endif
++  }
++#define GLASSJAR_NEVER_BUILT_STMT(CLASS)                                       \
++  if (::clang::Stmt::glassjarNeverBuilt(::clang::Stmt::CLASS##Class))          \
++    __builtin_unreachable();
++
+   // Make vanilla 'new' and 'delete' illegal for Stmts.
+ protected:
+   friend class ASTStmtReader;
+@@ -1477,6 +1516,8 @@ public:
+                   "changing bitfields changed sizeof(Stmt)");
+     static_assert(sizeof(*this) % alignof(void *) == 0,
+                   "Insufficient alignment!");
++    if (glassjarNeverBuilt(SC))
++      __builtin_trap();
+     StmtBits.sClass = SC;
+     if (StatisticsEnabled) Stmt::addStmtClass(SC);
+   }
+diff --git a/clang/include/clang/AST/StmtVisitor.h b/clang/include/clang/AST/StmtVisitor.h
+index 8b7b728dea..0327159feb 100644
+--- a/clang/include/clang/AST/StmtVisitor.h
++++ b/clang/include/clang/AST/StmtVisitor.h
+@@ -108,7 +108,9 @@ public:
+     default: llvm_unreachable("Unknown stmt kind!");
+ #define ABSTRACT_STMT(STMT)
+ #define STMT(CLASS, PARENT)                              \
+-    case Stmt::CLASS ## Class: DISPATCH(CLASS, CLASS);
++    case Stmt::CLASS ## Class:                           \
++      GLASSJAR_NEVER_BUILT_STMT(CLASS)                   \
++      DISPATCH(CLASS, CLASS);
+ #include "clang/AST/StmtNodes.inc"
+     }
+   }
+diff --git a/clang/include/clang/Basic/CodeGenOptions.h b/clang/include/clang/Basic/CodeGenOptions.h
+index c60ca507ff..b64367b859 100644
+--- a/clang/include/clang/Basic/CodeGenOptions.h
++++ b/clang/include/clang/Basic/CodeGenOptions.h
+@@ -592,39 +592,60 @@ public:
+ 
+   /// Check if Clang profile instrumenation is on.
+   bool hasProfileClangInstr() const {
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no profile instrumentation or use.
++#endif
+     return getProfileInstr() ==
+            llvm::driver::ProfileInstrKind::ProfileClangInstr;
+   }
+ 
+   /// Check if IR level profile instrumentation is on.
+   bool hasProfileIRInstr() const {
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no profile instrumentation or use.
++#endif
+     return getProfileInstr() == llvm::driver::ProfileInstrKind::ProfileIRInstr;
+   }
+ 
+   /// Check if CS IR level profile instrumentation is on.
+   bool hasProfileCSIRInstr() const {
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no profile instrumentation or use.
++#endif
+     return getProfileInstr() ==
+            llvm::driver::ProfileInstrKind::ProfileCSIRInstr;
+   }
+ 
+   /// Check if any form of instrumentation is on.
+   bool hasProfileInstr() const {
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no profile instrumentation or use.
++#endif
+     return getProfileInstr() != llvm::driver::ProfileInstrKind::ProfileNone;
+   }
+ 
+   /// Check if Clang profile use is on.
+   bool hasProfileClangUse() const {
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no profile instrumentation or use.
++#endif
+     return getProfileUse() == llvm::driver::ProfileInstrKind::ProfileClangInstr;
+   }
+ 
+   /// Check if IR level profile use is on.
+   bool hasProfileIRUse() const {
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no profile instrumentation or use.
++#endif
+     return getProfileUse() == llvm::driver::ProfileInstrKind::ProfileIRInstr ||
+            getProfileUse() == llvm::driver::ProfileInstrKind::ProfileCSIRInstr;
+   }
+ 
+   /// Check if CSIR profile use is on.
+   bool hasProfileCSIRUse() const {
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no profile instrumentation or use.
++#endif
+     return getProfileUse() == llvm::driver::ProfileInstrKind::ProfileCSIRInstr;
+   }
+ 
+diff --git a/clang/include/clang/Basic/LangOptions.h b/clang/include/clang/Basic/LangOptions.h
+index 4fa2dcffc7..f3dbe3cdab 100644
+--- a/clang/include/clang/Basic/LangOptions.h
++++ b/clang/include/clang/Basic/LangOptions.h
+@@ -432,10 +432,78 @@ public:
+   };
+ 
+   // Define simple language options (with no accessors).
++#ifdef GLASSJAR_TINY
++  // glassjar: a C/C++-only toolchain. The options below keep their storage
++  // (under another name) but read as a constant 0 and ignore writes, so every
++  // `if (LangOpts.OpenMP)` folds away and LTO drops the code behind it.
++  struct AlwaysOff {
++    constexpr AlwaysOff() = default;
++    template <typename T> constexpr explicit AlwaysOff(T) {}
++    constexpr operator unsigned() const { return 0; }
++    template <typename T> constexpr const AlwaysOff &operator=(T) const {
++      return *this;
++    }
++  };
++#define GLASSJAR_OFF_LANGOPTS(X)                                               \
++  X(ObjC) X(ObjCAutoRefCount) X(ObjCWeak) X(Blocks) X(OpenCL)                  \
++  X(OpenCLCPlusPlus) X(CUDA) X(CUDAIsDevice) X(HIPStdPar) X(OpenMP)            \
++  X(OpenMPSimd) X(OpenMPIRBuilder) X(HLSL) X(SYCLIsDevice) X(SYCLIsHost)       \
++  X(OpenACC) X(EnableNewConstInterp) X(APINotes) X(APINotesModules)            \
++  X(Borland) X(AltiVec) X(ZVector)
++#define ObjC ObjC_glassjar_unused
++#define ObjCAutoRefCount ObjCAutoRefCount_glassjar_unused
++#define ObjCWeak ObjCWeak_glassjar_unused
++#define Blocks Blocks_glassjar_unused
++#define OpenCL OpenCL_glassjar_unused
++#define OpenCLCPlusPlus OpenCLCPlusPlus_glassjar_unused
++#define CUDA CUDA_glassjar_unused
++#define CUDAIsDevice CUDAIsDevice_glassjar_unused
++#define HIPStdPar HIPStdPar_glassjar_unused
++#define OpenMP OpenMP_glassjar_unused
++#define OpenMPSimd OpenMPSimd_glassjar_unused
++#define OpenMPIRBuilder OpenMPIRBuilder_glassjar_unused
++#define HLSL HLSL_glassjar_unused
++#define SYCLIsDevice SYCLIsDevice_glassjar_unused
++#define SYCLIsHost SYCLIsHost_glassjar_unused
++#define OpenACC OpenACC_glassjar_unused
++#define EnableNewConstInterp EnableNewConstInterp_glassjar_unused
++#define APINotes APINotes_glassjar_unused
++#define APINotesModules APINotesModules_glassjar_unused
++#define Borland Borland_glassjar_unused
++#define AltiVec AltiVec_glassjar_unused
++#define ZVector ZVector_glassjar_unused
++#endif
+ #define LANGOPT(Name, Bits, Default, Compatibility, Description)               \
+   unsigned Name : Bits;
+ #define ENUM_LANGOPT(Name, Type, Bits, Default, Compatibility, Description)
+ #include "clang/Basic/LangOptions.def"
++#ifdef GLASSJAR_TINY
++#undef ObjC
++#undef ObjCAutoRefCount
++#undef ObjCWeak
++#undef Blocks
++#undef OpenCL
++#undef OpenCLCPlusPlus
++#undef CUDA
++#undef CUDAIsDevice
++#undef HIPStdPar
++#undef OpenMP
++#undef OpenMPSimd
++#undef OpenMPIRBuilder
++#undef HLSL
++#undef SYCLIsDevice
++#undef SYCLIsHost
++#undef OpenACC
++#undef EnableNewConstInterp
++#undef APINotes
++#undef APINotesModules
++#undef Borland
++#undef AltiVec
++#undef ZVector
++#define GLASSJAR_DECLARE_OFF(Name) static constexpr AlwaysOff Name{};
++  GLASSJAR_OFF_LANGOPTS(GLASSJAR_DECLARE_OFF)
++#undef GLASSJAR_DECLARE_OFF
++#endif
+ 
+ protected:
+   // Define language options of enumeration type. These are private, and will
+diff --git a/clang/include/clang/Basic/Sanitizers.h b/clang/include/clang/Basic/Sanitizers.h
+index 19105aa339..894bed3d7f 100644
+--- a/clang/include/clang/Basic/Sanitizers.h
++++ b/clang/include/clang/Basic/Sanitizers.h
+@@ -173,7 +173,11 @@ struct SanitizerSet {
+   /// Check if a certain (single) sanitizer is enabled.
+   bool has(SanitizerMask K) const {
+     assert(K.isPowerOf2() && "Has to be a single sanitizer.");
++#ifdef GLASSJAR_TINY
++    return false; // glassjar: no sanitizer runtimes in the browser sysroot.
++#else
+     return static_cast<bool>(Mask & K);
++#endif
+   }
+ 
+   bool has(SanitizerKind::SanitizerOrdinal O) const {
+@@ -181,7 +185,11 @@ struct SanitizerSet {
+   }
+ 
+   /// Check if one or more sanitizers are enabled.
++#ifdef GLASSJAR_TINY
++  bool hasOneOf(SanitizerMask K) const { return false; }
++#else
+   bool hasOneOf(SanitizerMask K) const { return static_cast<bool>(Mask & K); }
++#endif
+ 
+   /// Enable or disable a certain (single) sanitizer.
+   void set(SanitizerMask K, bool Value) {
+diff --git a/clang/lib/AST/ASTDiagnostic.cpp b/clang/lib/AST/ASTDiagnostic.cpp
+index b8023cb6fa..b989b0c28c 100644
+--- a/clang/lib/AST/ASTDiagnostic.cpp
++++ b/clang/lib/AST/ASTDiagnostic.cpp
+@@ -156,10 +156,13 @@ QualType clang::desugarForDiagnostic(ASTContext &Context, QualType QT,
+     }
+ 
+     // Don't desugar magic Objective-C types.
+-    if (QualType(Ty,0) == Context.getObjCIdType() ||
+-        QualType(Ty,0) == Context.getObjCClassType() ||
+-        QualType(Ty,0) == Context.getObjCSelType() ||
+-        QualType(Ty,0) == Context.getObjCProtoType())
++    // glassjar: these getters create the Objective-C declarations on first
++    // use; without Objective-C no type can be one of them.
++    if (Context.getLangOpts().ObjC &&
++        (QualType(Ty,0) == Context.getObjCIdType() ||
++         QualType(Ty,0) == Context.getObjCClassType() ||
++         QualType(Ty,0) == Context.getObjCSelType() ||
++         QualType(Ty,0) == Context.getObjCProtoType()))
+       break;
+ 
+     // Don't desugar va_list.
+diff --git a/clang/lib/AST/DeclBase.cpp b/clang/lib/AST/DeclBase.cpp
+index 0a1e442656..2c8d679049 100644
+--- a/clang/lib/AST/DeclBase.cpp
++++ b/clang/lib/AST/DeclBase.cpp
+@@ -1494,7 +1494,7 @@ DeclContext *DeclContext::getPrimaryContext() {
+     // There is only one DeclContext for these entities.
+     return this;
+ 
+-  case Decl::HLSLBuffer:
++  case Decl::HLSLBuffer: GLASSJAR_NEVER_BUILT_DECL(HLSLBuffer)
+     // Each buffer, even with the same name, is a distinct construct.
+     // Multiple buffers with the same name are allowed for backward
+     // compatibility.
+@@ -1508,26 +1508,26 @@ DeclContext *DeclContext::getPrimaryContext() {
+   case Decl::Namespace:
+     return static_cast<NamespaceDecl *>(this)->getFirstDecl();
+ 
+-  case Decl::ObjCMethod:
++  case Decl::ObjCMethod: GLASSJAR_NEVER_BUILT_DECL(ObjCMethod)
+     return this;
+ 
+-  case Decl::ObjCInterface:
++  case Decl::ObjCInterface: GLASSJAR_NEVER_BUILT_DECL(ObjCInterface)
+     if (auto *OID = dyn_cast<ObjCInterfaceDecl>(this))
+       if (auto *Def = OID->getDefinition())
+         return Def;
+     return this;
+ 
+-  case Decl::ObjCProtocol:
++  case Decl::ObjCProtocol: GLASSJAR_NEVER_BUILT_DECL(ObjCProtocol)
+     if (auto *OPD = dyn_cast<ObjCProtocolDecl>(this))
+       if (auto *Def = OPD->getDefinition())
+         return Def;
+     return this;
+ 
+-  case Decl::ObjCCategory:
++  case Decl::ObjCCategory: GLASSJAR_NEVER_BUILT_DECL(ObjCCategory)
+     return this;
+ 
+   case Decl::ObjCImplementation:
+-  case Decl::ObjCCategoryImpl:
++  case Decl::ObjCCategoryImpl: GLASSJAR_NEVER_BUILT_DECL(ObjCCategoryImpl)
+     return this;
+ 
+   // If this is a tag type that has a definition or is currently
+diff --git a/clang/lib/AST/Expr.cpp b/clang/lib/AST/Expr.cpp
+index 4bb979e51b..eed5e9ac59 100644
+--- a/clang/lib/AST/Expr.cpp
++++ b/clang/lib/AST/Expr.cpp
+@@ -1456,7 +1456,7 @@ static unsigned SizeOfCallExprInstance(Expr::StmtClass SC) {
+     return sizeof(CXXMemberCallExpr);
+   case Expr::UserDefinedLiteralClass:
+     return sizeof(UserDefinedLiteral);
+-  case Expr::CUDAKernelCallExprClass:
++  case Expr::CUDAKernelCallExprClass: GLASSJAR_NEVER_BUILT_STMT(CUDAKernelCallExpr)
+     return sizeof(CUDAKernelCallExpr);
+   default:
+     llvm_unreachable("unexpected class deriving from CallExpr!");
+diff --git a/clang/lib/AST/ExprClassification.cpp b/clang/lib/AST/ExprClassification.cpp
+index 9995d1b411..cd76ccc9fa 100644
+--- a/clang/lib/AST/ExprClassification.cpp
++++ b/clang/lib/AST/ExprClassification.cpp
+@@ -118,7 +118,7 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
+     llvm_unreachable("cannot classify a statement");
+ 
+     // First come the expressions that are always lvalues, unconditionally.
+-  case Expr::ObjCIsaExprClass:
++  case Expr::ObjCIsaExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCIsaExpr)
+     // Property references are lvalues
+   case Expr::ObjCSubscriptRefExprClass:
+   case Expr::ObjCPropertyRefExprClass:
+@@ -473,7 +473,7 @@ static Cl::Kinds ClassifyInternal(ASTContext &Ctx, const Expr *E) {
+   case Expr::CoyieldExprClass:
+     return ClassifyInternal(Ctx, cast<CoroutineSuspendExpr>(E)->getResumeExpr());
+   case Expr::SYCLUniqueStableNameExprClass:
+-  case Expr::OpenACCAsteriskSizeExprClass:
++  case Expr::OpenACCAsteriskSizeExprClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCAsteriskSizeExpr)
+     return Cl::CL_PRValue;
+     break;
+ 
+diff --git a/clang/lib/AST/ExprConstant.cpp b/clang/lib/AST/ExprConstant.cpp
+index ec7ca893fb..3b215bc157 100644
+--- a/clang/lib/AST/ExprConstant.cpp
++++ b/clang/lib/AST/ExprConstant.cpp
+@@ -817,7 +817,12 @@ namespace {
+ 
+     /// Enable the experimental new constant interpreter. If an expression is
+     /// not supported by the interpreter, an error is triggered.
++#ifdef GLASSJAR_TINY
++    // glassjar: the experimental bytecode interpreter is never enabled.
++    static constexpr bool EnableNewConstInterp = false;
++#else
+     bool EnableNewConstInterp;
++#endif
+ 
+     /// BottomFrame - The frame in which evaluation started. This must be
+     /// initialized after CurrentCall and CallStackDepth.
+@@ -931,7 +936,9 @@ namespace {
+         : Ctx(const_cast<ASTContext &>(C)), EvalStatus(S), CurrentCall(nullptr),
+           CallStackDepth(0), NextCallIndex(1),
+           StepsLeft(C.getLangOpts().ConstexprStepLimit),
++#ifndef GLASSJAR_TINY
+           EnableNewConstInterp(C.getLangOpts().EnableNewConstInterp),
++#endif
+           BottomFrame(*this, SourceLocation(), /*Callee=*/nullptr,
+                       /*This=*/nullptr,
+                       /*CallExpr=*/nullptr, CallRef()),
+@@ -2100,7 +2107,7 @@ static bool IsGlobalLValue(APValue::LValueBase B) {
+   case Expr::ObjCStringLiteralClass:
+   case Expr::ObjCEncodeExprClass:
+     return true;
+-  case Expr::ObjCBoxedExprClass:
++  case Expr::ObjCBoxedExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCBoxedExpr)
+     return cast<ObjCBoxedExpr>(E)->isExpressibleAsConstantInitializer();
+   case Expr::CallExprClass:
+     return IsOpaqueConstantCall(cast<CallExpr>(E));
+@@ -2109,7 +2116,7 @@ static bool IsGlobalLValue(APValue::LValueBase B) {
+     return true;
+   // A Block literal expression may be used as the initialization value for
+   // Block variables at global or local static scope.
+-  case Expr::BlockExprClass:
++  case Expr::BlockExprClass: GLASSJAR_NEVER_BUILT_STMT(BlockExpr)
+     return !cast<BlockExpr>(E)->getBlockDecl()->hasCaptures();
+   // The APValue generated from a __builtin_source_location will be emitted as a
+   // literal.
+diff --git a/clang/lib/AST/ItaniumMangle.cpp b/clang/lib/AST/ItaniumMangle.cpp
+index fa28c0d444..4deaea0c8d 100644
+--- a/clang/lib/AST/ItaniumMangle.cpp
++++ b/clang/lib/AST/ItaniumMangle.cpp
+@@ -5738,7 +5738,7 @@ recurse:
+     break;
+ 
+   // FIXME. __objc_yes/__objc_no are mangled same as true/false
+-  case Expr::ObjCBoolLiteralExprClass:
++  case Expr::ObjCBoolLiteralExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCBoolLiteralExpr)
+     // <expr-primary>
+     Out << "Lb";
+     Out << (cast<ObjCBoolLiteralExpr>(E)->getValue() ? '1' : '0');
+diff --git a/clang/lib/AST/ODRDiagsEmitter.cpp b/clang/lib/AST/ODRDiagsEmitter.cpp
+index 74f3881ed3..4e73e24e2c 100644
+--- a/clang/lib/AST/ODRDiagsEmitter.cpp
++++ b/clang/lib/AST/ODRDiagsEmitter.cpp
+@@ -613,11 +613,11 @@ ODRDiagsEmitter::FindTypeDiffs(DeclHashes &FirstHashes,
+       return Friend;
+     case Decl::FunctionTemplate:
+       return FunctionTemplate;
+-    case Decl::ObjCMethod:
++    case Decl::ObjCMethod: GLASSJAR_NEVER_BUILT_DECL(ObjCMethod)
+       return ObjCMethod;
+-    case Decl::ObjCIvar:
++    case Decl::ObjCIvar: GLASSJAR_NEVER_BUILT_DECL(ObjCIvar)
+       return ObjCIvar;
+-    case Decl::ObjCProperty:
++    case Decl::ObjCProperty: GLASSJAR_NEVER_BUILT_DECL(ObjCProperty)
+       return ObjCProperty;
+     }
+   };
+diff --git a/clang/lib/AST/ParentMap.cpp b/clang/lib/AST/ParentMap.cpp
+index e62e71bf5a..dd330cc1fa 100644
+--- a/clang/lib/AST/ParentMap.cpp
++++ b/clang/lib/AST/ParentMap.cpp
+@@ -215,7 +215,7 @@ bool ParentMap::isConsumedExpr(Expr* E) const {
+       return DirectChild == cast<IndirectGotoStmt>(P)->getTarget();
+     case Stmt::SwitchStmtClass:
+       return DirectChild == cast<SwitchStmt>(P)->getCond();
+-    case Stmt::ObjCForCollectionStmtClass:
++    case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+       return DirectChild == cast<ObjCForCollectionStmt>(P)->getCollection();
+     case Stmt::ReturnStmtClass:
+       return true;
+diff --git a/clang/lib/Analysis/CFG.cpp b/clang/lib/Analysis/CFG.cpp
+index f8a2afec79..1c768dad73 100644
+--- a/clang/lib/Analysis/CFG.cpp
++++ b/clang/lib/Analysis/CFG.cpp
+@@ -2320,7 +2320,7 @@ CFGBlock *CFGBuilder::Visit(Stmt * S, AddStmtChoice asc,
+     case Stmt::BinaryOperatorClass:
+       return VisitBinaryOperator(cast<BinaryOperator>(S), asc);
+ 
+-    case Stmt::BlockExprClass:
++    case Stmt::BlockExprClass: GLASSJAR_NEVER_BUILT_STMT(BlockExpr)
+       return VisitBlockExpr(cast<BlockExpr>(S), asc);
+ 
+     case Stmt::BreakStmtClass:
+@@ -2442,25 +2442,25 @@ CFGBlock *CFGBuilder::Visit(Stmt * S, AddStmtChoice asc,
+     case Stmt::NullStmtClass:
+       return Block;
+ 
+-    case Stmt::ObjCAtCatchStmtClass:
++    case Stmt::ObjCAtCatchStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAtCatchStmt)
+       return VisitObjCAtCatchStmt(cast<ObjCAtCatchStmt>(S));
+ 
+-    case Stmt::ObjCAutoreleasePoolStmtClass:
++    case Stmt::ObjCAutoreleasePoolStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAutoreleasePoolStmt)
+       return VisitObjCAutoreleasePoolStmt(cast<ObjCAutoreleasePoolStmt>(S));
+ 
+-    case Stmt::ObjCAtSynchronizedStmtClass:
++    case Stmt::ObjCAtSynchronizedStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAtSynchronizedStmt)
+       return VisitObjCAtSynchronizedStmt(cast<ObjCAtSynchronizedStmt>(S));
+ 
+-    case Stmt::ObjCAtThrowStmtClass:
++    case Stmt::ObjCAtThrowStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAtThrowStmt)
+       return VisitObjCAtThrowStmt(cast<ObjCAtThrowStmt>(S));
+ 
+-    case Stmt::ObjCAtTryStmtClass:
++    case Stmt::ObjCAtTryStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAtTryStmt)
+       return VisitObjCAtTryStmt(cast<ObjCAtTryStmt>(S));
+ 
+-    case Stmt::ObjCForCollectionStmtClass:
++    case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+       return VisitObjCForCollectionStmt(cast<ObjCForCollectionStmt>(S));
+ 
+-    case Stmt::ObjCMessageExprClass:
++    case Stmt::ObjCMessageExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCMessageExpr)
+       return VisitObjCMessageExpr(cast<ObjCMessageExpr>(S), asc);
+ 
+     case Stmt::OpaqueValueExprClass:
+@@ -6453,7 +6453,7 @@ const Stmt *CFGBlock::getTerminatorCondition(bool StripParens) const {
+       E = cast<BinaryOperator>(Terminator)->getLHS();
+       break;
+ 
+-    case Stmt::ObjCForCollectionStmtClass:
++    case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+       return Terminator;
+   }
+ 
+diff --git a/clang/lib/Analysis/IssueHash.cpp b/clang/lib/Analysis/IssueHash.cpp
+index e4b73d37a6..7a895d60a2 100644
+--- a/clang/lib/Analysis/IssueHash.cpp
++++ b/clang/lib/Analysis/IssueHash.cpp
+@@ -103,7 +103,7 @@ static std::string GetEnclosingDeclContextSignature(const Decl *D) {
+     case Decl::Function:
+       DeclName = GetSignature(dyn_cast_or_null<FunctionDecl>(ND));
+       break;
+-    case Decl::ObjCMethod:
++    case Decl::ObjCMethod: GLASSJAR_NEVER_BUILT_DECL(ObjCMethod)
+       // ObjC Methods can not be overloaded, qualified name uniquely identifies
+       // the method.
+       DeclName = ND->getQualifiedNameAsString();
+diff --git a/clang/lib/Analysis/ReachableCode.cpp b/clang/lib/Analysis/ReachableCode.cpp
+index 4a9ab5d9f0..7d5d069224 100644
+--- a/clang/lib/Analysis/ReachableCode.cpp
++++ b/clang/lib/Analysis/ReachableCode.cpp
+@@ -218,7 +218,7 @@ static bool isConfigurationValue(const Stmt *S,
+     }
+     case Stmt::DeclRefExprClass:
+       return isConfigurationValue(cast<DeclRefExpr>(S)->getDecl(), PP);
+-    case Stmt::ObjCBoolLiteralExprClass:
++    case Stmt::ObjCBoolLiteralExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCBoolLiteralExpr)
+       IgnoreYES_NO = true;
+       [[fallthrough]];
+     case Stmt::CXXBoolLiteralExprClass:
+diff --git a/clang/lib/Analysis/ThreadSafetyCommon.cpp b/clang/lib/Analysis/ThreadSafetyCommon.cpp
+index 5bee86470e..b3ea5ffe67 100644
+--- a/clang/lib/Analysis/ThreadSafetyCommon.cpp
++++ b/clang/lib/Analysis/ThreadSafetyCommon.cpp
+@@ -300,7 +300,7 @@ til::SExpr *SExprBuilder::translate(const Stmt *S, CallingContext *Ctx) {
+     return translateCXXThisExpr(cast<CXXThisExpr>(S), Ctx);
+   case Stmt::MemberExprClass:
+     return translateMemberExpr(cast<MemberExpr>(S), Ctx);
+-  case Stmt::ObjCIvarRefExprClass:
++  case Stmt::ObjCIvarRefExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCIvarRefExpr)
+     return translateObjCIVarRefExpr(cast<ObjCIvarRefExpr>(S), Ctx);
+   case Stmt::CallExprClass:
+     return translateCallExpr(cast<CallExpr>(S), Ctx);
+diff --git a/clang/lib/CIR/CodeGen/CIRGenDecl.cpp b/clang/lib/CIR/CodeGen/CIRGenDecl.cpp
+index 393633f686..d1eb3adbaa 100644
+--- a/clang/lib/CIR/CodeGen/CIRGenDecl.cpp
++++ b/clang/lib/CIR/CodeGen/CIRGenDecl.cpp
+@@ -774,28 +774,28 @@ void CIRGenFunction::emitDecl(const Decl &d, bool evaluateConditionDecl) {
+   case Decl::OpenACCDeclare:
+     emitOpenACCDeclare(cast<OpenACCDeclareDecl>(d));
+     return;
+-  case Decl::OpenACCRoutine:
++  case Decl::OpenACCRoutine: GLASSJAR_NEVER_BUILT_DECL(OpenACCRoutine)
+     emitOpenACCRoutine(cast<OpenACCRoutineDecl>(d));
+     return;
+-  case Decl::OMPThreadPrivate:
++  case Decl::OMPThreadPrivate: GLASSJAR_NEVER_BUILT_DECL(OMPThreadPrivate)
+     emitOMPThreadPrivateDecl(cast<OMPThreadPrivateDecl>(d));
+     return;
+-  case Decl::OMPGroupPrivate:
++  case Decl::OMPGroupPrivate: GLASSJAR_NEVER_BUILT_DECL(OMPGroupPrivate)
+     emitOMPGroupPrivateDecl(cast<OMPGroupPrivateDecl>(d));
+     return;
+-  case Decl::OMPAllocate:
++  case Decl::OMPAllocate: GLASSJAR_NEVER_BUILT_DECL(OMPAllocate)
+     emitOMPAllocateDecl(cast<OMPAllocateDecl>(d));
+     return;
+-  case Decl::OMPCapturedExpr:
++  case Decl::OMPCapturedExpr: GLASSJAR_NEVER_BUILT_DECL(OMPCapturedExpr)
+     emitOMPCapturedExpr(cast<OMPCapturedExprDecl>(d));
+     return;
+-  case Decl::OMPRequires:
++  case Decl::OMPRequires: GLASSJAR_NEVER_BUILT_DECL(OMPRequires)
+     emitOMPRequiresDecl(cast<OMPRequiresDecl>(d));
+     return;
+-  case Decl::OMPDeclareMapper:
++  case Decl::OMPDeclareMapper: GLASSJAR_NEVER_BUILT_DECL(OMPDeclareMapper)
+     emitOMPDeclareMapper(cast<OMPDeclareMapperDecl>(d));
+     return;
+-  case Decl::OMPDeclareReduction:
++  case Decl::OMPDeclareReduction: GLASSJAR_NEVER_BUILT_DECL(OMPDeclareReduction)
+     emitOMPDeclareReduction(cast<OMPDeclareReductionDecl>(d));
+     return;
+   case Decl::Typedef:     // typedef int X;
+diff --git a/clang/lib/CIR/CodeGen/CIRGenModule.cpp b/clang/lib/CIR/CodeGen/CIRGenModule.cpp
+index 42df630462..138f8dd626 100644
+--- a/clang/lib/CIR/CodeGen/CIRGenModule.cpp
++++ b/clang/lib/CIR/CodeGen/CIRGenModule.cpp
+@@ -1590,28 +1590,28 @@ void CIRGenModule::emitTopLevelDecl(Decl *decl) {
+   case Decl::OpenACCRoutine:
+     emitGlobalOpenACCRoutineDecl(cast<OpenACCRoutineDecl>(decl));
+     break;
+-  case Decl::OpenACCDeclare:
++  case Decl::OpenACCDeclare: GLASSJAR_NEVER_BUILT_DECL(OpenACCDeclare)
+     emitGlobalOpenACCDeclareDecl(cast<OpenACCDeclareDecl>(decl));
+     break;
+-  case Decl::OMPThreadPrivate:
++  case Decl::OMPThreadPrivate: GLASSJAR_NEVER_BUILT_DECL(OMPThreadPrivate)
+     emitOMPThreadPrivateDecl(cast<OMPThreadPrivateDecl>(decl));
+     break;
+-  case Decl::OMPGroupPrivate:
++  case Decl::OMPGroupPrivate: GLASSJAR_NEVER_BUILT_DECL(OMPGroupPrivate)
+     emitOMPGroupPrivateDecl(cast<OMPGroupPrivateDecl>(decl));
+     break;
+-  case Decl::OMPAllocate:
++  case Decl::OMPAllocate: GLASSJAR_NEVER_BUILT_DECL(OMPAllocate)
+     emitOMPAllocateDecl(cast<OMPAllocateDecl>(decl));
+     break;
+-  case Decl::OMPCapturedExpr:
++  case Decl::OMPCapturedExpr: GLASSJAR_NEVER_BUILT_DECL(OMPCapturedExpr)
+     emitOMPCapturedExpr(cast<OMPCapturedExprDecl>(decl));
+     break;
+-  case Decl::OMPDeclareReduction:
++  case Decl::OMPDeclareReduction: GLASSJAR_NEVER_BUILT_DECL(OMPDeclareReduction)
+     emitOMPDeclareReduction(cast<OMPDeclareReductionDecl>(decl));
+     break;
+-  case Decl::OMPDeclareMapper:
++  case Decl::OMPDeclareMapper: GLASSJAR_NEVER_BUILT_DECL(OMPDeclareMapper)
+     emitOMPDeclareMapper(cast<OMPDeclareMapperDecl>(decl));
+     break;
+-  case Decl::OMPRequires:
++  case Decl::OMPRequires: GLASSJAR_NEVER_BUILT_DECL(OMPRequires)
+     emitOMPRequiresDecl(cast<OMPRequiresDecl>(decl));
+     break;
+   case Decl::Enum:
+diff --git a/clang/lib/CIR/CodeGen/CIRGenStmt.cpp b/clang/lib/CIR/CodeGen/CIRGenStmt.cpp
+index db3827340c..b5aef0a1a5 100644
+--- a/clang/lib/CIR/CodeGen/CIRGenStmt.cpp
++++ b/clang/lib/CIR/CodeGen/CIRGenStmt.cpp
+@@ -166,132 +166,132 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
+     return emitIndirectGotoStmt(cast<IndirectGotoStmt>(*s));
+   case Stmt::CoreturnStmtClass:
+     return emitCoreturnStmt(cast<CoreturnStmt>(*s));
+-  case Stmt::OpenACCComputeConstructClass:
++  case Stmt::OpenACCComputeConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCComputeConstruct)
+     return emitOpenACCComputeConstruct(cast<OpenACCComputeConstruct>(*s));
+-  case Stmt::OpenACCLoopConstructClass:
++  case Stmt::OpenACCLoopConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCLoopConstruct)
+     return emitOpenACCLoopConstruct(cast<OpenACCLoopConstruct>(*s));
+-  case Stmt::OpenACCCombinedConstructClass:
++  case Stmt::OpenACCCombinedConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCCombinedConstruct)
+     return emitOpenACCCombinedConstruct(cast<OpenACCCombinedConstruct>(*s));
+-  case Stmt::OpenACCDataConstructClass:
++  case Stmt::OpenACCDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCDataConstruct)
+     return emitOpenACCDataConstruct(cast<OpenACCDataConstruct>(*s));
+-  case Stmt::OpenACCEnterDataConstructClass:
++  case Stmt::OpenACCEnterDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCEnterDataConstruct)
+     return emitOpenACCEnterDataConstruct(cast<OpenACCEnterDataConstruct>(*s));
+-  case Stmt::OpenACCExitDataConstructClass:
++  case Stmt::OpenACCExitDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCExitDataConstruct)
+     return emitOpenACCExitDataConstruct(cast<OpenACCExitDataConstruct>(*s));
+-  case Stmt::OpenACCHostDataConstructClass:
++  case Stmt::OpenACCHostDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCHostDataConstruct)
+     return emitOpenACCHostDataConstruct(cast<OpenACCHostDataConstruct>(*s));
+-  case Stmt::OpenACCWaitConstructClass:
++  case Stmt::OpenACCWaitConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCWaitConstruct)
+     return emitOpenACCWaitConstruct(cast<OpenACCWaitConstruct>(*s));
+-  case Stmt::OpenACCInitConstructClass:
++  case Stmt::OpenACCInitConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCInitConstruct)
+     return emitOpenACCInitConstruct(cast<OpenACCInitConstruct>(*s));
+-  case Stmt::OpenACCShutdownConstructClass:
++  case Stmt::OpenACCShutdownConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCShutdownConstruct)
+     return emitOpenACCShutdownConstruct(cast<OpenACCShutdownConstruct>(*s));
+-  case Stmt::OpenACCSetConstructClass:
++  case Stmt::OpenACCSetConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCSetConstruct)
+     return emitOpenACCSetConstruct(cast<OpenACCSetConstruct>(*s));
+-  case Stmt::OpenACCUpdateConstructClass:
++  case Stmt::OpenACCUpdateConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCUpdateConstruct)
+     return emitOpenACCUpdateConstruct(cast<OpenACCUpdateConstruct>(*s));
+-  case Stmt::OpenACCCacheConstructClass:
++  case Stmt::OpenACCCacheConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCCacheConstruct)
+     return emitOpenACCCacheConstruct(cast<OpenACCCacheConstruct>(*s));
+-  case Stmt::OpenACCAtomicConstructClass:
++  case Stmt::OpenACCAtomicConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCAtomicConstruct)
+     return emitOpenACCAtomicConstruct(cast<OpenACCAtomicConstruct>(*s));
+   case Stmt::GCCAsmStmtClass:
+   case Stmt::MSAsmStmtClass:
+     return emitAsmStmt(cast<AsmStmt>(*s));
+-  case Stmt::OMPScopeDirectiveClass:
++  case Stmt::OMPScopeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPScopeDirective)
+     return emitOMPScopeDirective(cast<OMPScopeDirective>(*s));
+-  case Stmt::OMPErrorDirectiveClass:
++  case Stmt::OMPErrorDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPErrorDirective)
+     return emitOMPErrorDirective(cast<OMPErrorDirective>(*s));
+-  case Stmt::OMPParallelDirectiveClass:
++  case Stmt::OMPParallelDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelDirective)
+     return emitOMPParallelDirective(cast<OMPParallelDirective>(*s));
+-  case Stmt::OMPTaskwaitDirectiveClass:
++  case Stmt::OMPTaskwaitDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskwaitDirective)
+     return emitOMPTaskwaitDirective(cast<OMPTaskwaitDirective>(*s));
+-  case Stmt::OMPTaskyieldDirectiveClass:
++  case Stmt::OMPTaskyieldDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskyieldDirective)
+     return emitOMPTaskyieldDirective(cast<OMPTaskyieldDirective>(*s));
+-  case Stmt::OMPBarrierDirectiveClass:
++  case Stmt::OMPBarrierDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPBarrierDirective)
+     return emitOMPBarrierDirective(cast<OMPBarrierDirective>(*s));
+-  case Stmt::OMPMetaDirectiveClass:
++  case Stmt::OMPMetaDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMetaDirective)
+     return emitOMPMetaDirective(cast<OMPMetaDirective>(*s));
+-  case Stmt::OMPCanonicalLoopClass:
++  case Stmt::OMPCanonicalLoopClass: GLASSJAR_NEVER_BUILT_STMT(OMPCanonicalLoop)
+     return emitOMPCanonicalLoop(cast<OMPCanonicalLoop>(*s));
+-  case Stmt::OMPSimdDirectiveClass:
++  case Stmt::OMPSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSimdDirective)
+     return emitOMPSimdDirective(cast<OMPSimdDirective>(*s));
+-  case Stmt::OMPTileDirectiveClass:
++  case Stmt::OMPTileDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTileDirective)
+     return emitOMPTileDirective(cast<OMPTileDirective>(*s));
+-  case Stmt::OMPUnrollDirectiveClass:
++  case Stmt::OMPUnrollDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPUnrollDirective)
+     return emitOMPUnrollDirective(cast<OMPUnrollDirective>(*s));
+-  case Stmt::OMPFuseDirectiveClass:
++  case Stmt::OMPFuseDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPFuseDirective)
+     return emitOMPFuseDirective(cast<OMPFuseDirective>(*s));
+-  case Stmt::OMPForDirectiveClass:
++  case Stmt::OMPForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPForDirective)
+     return emitOMPForDirective(cast<OMPForDirective>(*s));
+-  case Stmt::OMPForSimdDirectiveClass:
++  case Stmt::OMPForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPForSimdDirective)
+     return emitOMPForSimdDirective(cast<OMPForSimdDirective>(*s));
+-  case Stmt::OMPSectionsDirectiveClass:
++  case Stmt::OMPSectionsDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSectionsDirective)
+     return emitOMPSectionsDirective(cast<OMPSectionsDirective>(*s));
+-  case Stmt::OMPSectionDirectiveClass:
++  case Stmt::OMPSectionDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSectionDirective)
+     return emitOMPSectionDirective(cast<OMPSectionDirective>(*s));
+-  case Stmt::OMPSingleDirectiveClass:
++  case Stmt::OMPSingleDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSingleDirective)
+     return emitOMPSingleDirective(cast<OMPSingleDirective>(*s));
+-  case Stmt::OMPMasterDirectiveClass:
++  case Stmt::OMPMasterDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMasterDirective)
+     return emitOMPMasterDirective(cast<OMPMasterDirective>(*s));
+-  case Stmt::OMPCriticalDirectiveClass:
++  case Stmt::OMPCriticalDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPCriticalDirective)
+     return emitOMPCriticalDirective(cast<OMPCriticalDirective>(*s));
+-  case Stmt::OMPParallelForDirectiveClass:
++  case Stmt::OMPParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelForDirective)
+     return emitOMPParallelForDirective(cast<OMPParallelForDirective>(*s));
+-  case Stmt::OMPParallelForSimdDirectiveClass:
++  case Stmt::OMPParallelForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelForSimdDirective)
+     return emitOMPParallelForSimdDirective(
+         cast<OMPParallelForSimdDirective>(*s));
+   case Stmt::OMPParallelMasterDirectiveClass:
+     return emitOMPParallelMasterDirective(cast<OMPParallelMasterDirective>(*s));
+-  case Stmt::OMPParallelSectionsDirectiveClass:
++  case Stmt::OMPParallelSectionsDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelSectionsDirective)
+     return emitOMPParallelSectionsDirective(
+         cast<OMPParallelSectionsDirective>(*s));
+   case Stmt::OMPTaskDirectiveClass:
+     return emitOMPTaskDirective(cast<OMPTaskDirective>(*s));
+-  case Stmt::OMPTaskgroupDirectiveClass:
++  case Stmt::OMPTaskgroupDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskgroupDirective)
+     return emitOMPTaskgroupDirective(cast<OMPTaskgroupDirective>(*s));
+-  case Stmt::OMPFlushDirectiveClass:
++  case Stmt::OMPFlushDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPFlushDirective)
+     return emitOMPFlushDirective(cast<OMPFlushDirective>(*s));
+-  case Stmt::OMPDepobjDirectiveClass:
++  case Stmt::OMPDepobjDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDepobjDirective)
+     return emitOMPDepobjDirective(cast<OMPDepobjDirective>(*s));
+-  case Stmt::OMPScanDirectiveClass:
++  case Stmt::OMPScanDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPScanDirective)
+     return emitOMPScanDirective(cast<OMPScanDirective>(*s));
+-  case Stmt::OMPOrderedDirectiveClass:
++  case Stmt::OMPOrderedDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPOrderedDirective)
+     return emitOMPOrderedDirective(cast<OMPOrderedDirective>(*s));
+-  case Stmt::OMPAtomicDirectiveClass:
++  case Stmt::OMPAtomicDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPAtomicDirective)
+     return emitOMPAtomicDirective(cast<OMPAtomicDirective>(*s));
+-  case Stmt::OMPTargetDirectiveClass:
++  case Stmt::OMPTargetDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetDirective)
+     return emitOMPTargetDirective(cast<OMPTargetDirective>(*s));
+-  case Stmt::OMPTeamsDirectiveClass:
++  case Stmt::OMPTeamsDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsDirective)
+     return emitOMPTeamsDirective(cast<OMPTeamsDirective>(*s));
+-  case Stmt::OMPCancellationPointDirectiveClass:
++  case Stmt::OMPCancellationPointDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPCancellationPointDirective)
+     return emitOMPCancellationPointDirective(
+         cast<OMPCancellationPointDirective>(*s));
+   case Stmt::OMPCancelDirectiveClass:
+     return emitOMPCancelDirective(cast<OMPCancelDirective>(*s));
+-  case Stmt::OMPTargetDataDirectiveClass:
++  case Stmt::OMPTargetDataDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetDataDirective)
+     return emitOMPTargetDataDirective(cast<OMPTargetDataDirective>(*s));
+-  case Stmt::OMPTargetEnterDataDirectiveClass:
++  case Stmt::OMPTargetEnterDataDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetEnterDataDirective)
+     return emitOMPTargetEnterDataDirective(
+         cast<OMPTargetEnterDataDirective>(*s));
+   case Stmt::OMPTargetExitDataDirectiveClass:
+     return emitOMPTargetExitDataDirective(cast<OMPTargetExitDataDirective>(*s));
+-  case Stmt::OMPTargetParallelDirectiveClass:
++  case Stmt::OMPTargetParallelDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetParallelDirective)
+     return emitOMPTargetParallelDirective(cast<OMPTargetParallelDirective>(*s));
+-  case Stmt::OMPTargetParallelForDirectiveClass:
++  case Stmt::OMPTargetParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetParallelForDirective)
+     return emitOMPTargetParallelForDirective(
+         cast<OMPTargetParallelForDirective>(*s));
+   case Stmt::OMPTaskLoopDirectiveClass:
+     return emitOMPTaskLoopDirective(cast<OMPTaskLoopDirective>(*s));
+-  case Stmt::OMPTaskLoopSimdDirectiveClass:
++  case Stmt::OMPTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskLoopSimdDirective)
+     return emitOMPTaskLoopSimdDirective(cast<OMPTaskLoopSimdDirective>(*s));
+-  case Stmt::OMPMaskedTaskLoopDirectiveClass:
++  case Stmt::OMPMaskedTaskLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMaskedTaskLoopDirective)
+     return emitOMPMaskedTaskLoopDirective(cast<OMPMaskedTaskLoopDirective>(*s));
+-  case Stmt::OMPMaskedTaskLoopSimdDirectiveClass:
++  case Stmt::OMPMaskedTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMaskedTaskLoopSimdDirective)
+     return emitOMPMaskedTaskLoopSimdDirective(
+         cast<OMPMaskedTaskLoopSimdDirective>(*s));
+   case Stmt::OMPMasterTaskLoopDirectiveClass:
+     return emitOMPMasterTaskLoopDirective(cast<OMPMasterTaskLoopDirective>(*s));
+-  case Stmt::OMPMasterTaskLoopSimdDirectiveClass:
++  case Stmt::OMPMasterTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMasterTaskLoopSimdDirective)
+     return emitOMPMasterTaskLoopSimdDirective(
+         cast<OMPMasterTaskLoopSimdDirective>(*s));
+   case Stmt::OMPParallelGenericLoopDirectiveClass:
+@@ -299,7 +299,7 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
+         cast<OMPParallelGenericLoopDirective>(*s));
+   case Stmt::OMPParallelMaskedDirectiveClass:
+     return emitOMPParallelMaskedDirective(cast<OMPParallelMaskedDirective>(*s));
+-  case Stmt::OMPParallelMaskedTaskLoopDirectiveClass:
++  case Stmt::OMPParallelMaskedTaskLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelMaskedTaskLoopDirective)
+     return emitOMPParallelMaskedTaskLoopDirective(
+         cast<OMPParallelMaskedTaskLoopDirective>(*s));
+   case Stmt::OMPParallelMaskedTaskLoopSimdDirectiveClass:
+@@ -313,7 +313,7 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
+         cast<OMPParallelMasterTaskLoopSimdDirective>(*s));
+   case Stmt::OMPDistributeDirectiveClass:
+     return emitOMPDistributeDirective(cast<OMPDistributeDirective>(*s));
+-  case Stmt::OMPDistributeParallelForDirectiveClass:
++  case Stmt::OMPDistributeParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDistributeParallelForDirective)
+     return emitOMPDistributeParallelForDirective(
+         cast<OMPDistributeParallelForDirective>(*s));
+   case Stmt::OMPDistributeParallelForSimdDirectiveClass:
+@@ -321,7 +321,7 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
+         cast<OMPDistributeParallelForSimdDirective>(*s));
+   case Stmt::OMPDistributeSimdDirectiveClass:
+     return emitOMPDistributeSimdDirective(cast<OMPDistributeSimdDirective>(*s));
+-  case Stmt::OMPTargetParallelGenericLoopDirectiveClass:
++  case Stmt::OMPTargetParallelGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetParallelGenericLoopDirective)
+     return emitOMPTargetParallelGenericLoopDirective(
+         cast<OMPTargetParallelGenericLoopDirective>(*s));
+   case Stmt::OMPTargetParallelForSimdDirectiveClass:
+@@ -329,12 +329,12 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
+         cast<OMPTargetParallelForSimdDirective>(*s));
+   case Stmt::OMPTargetSimdDirectiveClass:
+     return emitOMPTargetSimdDirective(cast<OMPTargetSimdDirective>(*s));
+-  case Stmt::OMPTargetTeamsGenericLoopDirectiveClass:
++  case Stmt::OMPTargetTeamsGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsGenericLoopDirective)
+     return emitOMPTargetTeamsGenericLoopDirective(
+         cast<OMPTargetTeamsGenericLoopDirective>(*s));
+   case Stmt::OMPTargetUpdateDirectiveClass:
+     return emitOMPTargetUpdateDirective(cast<OMPTargetUpdateDirective>(*s));
+-  case Stmt::OMPTeamsDistributeDirectiveClass:
++  case Stmt::OMPTeamsDistributeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsDistributeDirective)
+     return emitOMPTeamsDistributeDirective(
+         cast<OMPTeamsDistributeDirective>(*s));
+   case Stmt::OMPTeamsDistributeSimdDirectiveClass:
+@@ -351,7 +351,7 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
+         cast<OMPTeamsGenericLoopDirective>(*s));
+   case Stmt::OMPTargetTeamsDirectiveClass:
+     return emitOMPTargetTeamsDirective(cast<OMPTargetTeamsDirective>(*s));
+-  case Stmt::OMPTargetTeamsDistributeDirectiveClass:
++  case Stmt::OMPTargetTeamsDistributeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsDistributeDirective)
+     return emitOMPTargetTeamsDistributeDirective(
+         cast<OMPTargetTeamsDistributeDirective>(*s));
+   case Stmt::OMPTargetTeamsDistributeParallelForDirectiveClass:
+@@ -365,19 +365,19 @@ mlir::LogicalResult CIRGenFunction::emitStmt(const Stmt *s,
+         cast<OMPTargetTeamsDistributeSimdDirective>(*s));
+   case Stmt::OMPInteropDirectiveClass:
+     return emitOMPInteropDirective(cast<OMPInteropDirective>(*s));
+-  case Stmt::OMPDispatchDirectiveClass:
++  case Stmt::OMPDispatchDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDispatchDirective)
+     return emitOMPDispatchDirective(cast<OMPDispatchDirective>(*s));
+-  case Stmt::OMPGenericLoopDirectiveClass:
++  case Stmt::OMPGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPGenericLoopDirective)
+     return emitOMPGenericLoopDirective(cast<OMPGenericLoopDirective>(*s));
+-  case Stmt::OMPReverseDirectiveClass:
++  case Stmt::OMPReverseDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPReverseDirective)
+     return emitOMPReverseDirective(cast<OMPReverseDirective>(*s));
+-  case Stmt::OMPInterchangeDirectiveClass:
++  case Stmt::OMPInterchangeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPInterchangeDirective)
+     return emitOMPInterchangeDirective(cast<OMPInterchangeDirective>(*s));
+-  case Stmt::OMPAssumeDirectiveClass:
++  case Stmt::OMPAssumeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPAssumeDirective)
+     return emitOMPAssumeDirective(cast<OMPAssumeDirective>(*s));
+-  case Stmt::OMPMaskedDirectiveClass:
++  case Stmt::OMPMaskedDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMaskedDirective)
+     return emitOMPMaskedDirective(cast<OMPMaskedDirective>(*s));
+-  case Stmt::OMPStripeDirectiveClass:
++  case Stmt::OMPStripeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPStripeDirective)
+     return emitOMPStripeDirective(cast<OMPStripeDirective>(*s));
+   case Stmt::LabelStmtClass:
+   case Stmt::AttributedStmtClass:
+diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
+index d411ef1bf8..86fc87cbde 100644
+--- a/clang/lib/CodeGen/BackendUtil.cpp
++++ b/clang/lib/CodeGen/BackendUtil.cpp
+@@ -618,6 +618,9 @@ void EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
+ }
+ 
+ static OptimizationLevel mapToLevel(const CodeGenOptions &Opts) {
++#ifdef GLASSJAR_O0_ONLY
++  return OptimizationLevel::O0;
++#endif
+   switch (Opts.OptimizationLevel) {
+   default:
+     llvm_unreachable("Invalid optimization level!");
+@@ -918,6 +921,9 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
+       (CodeGenOpts.DebugPassManager || DebugPassStructure),
+       CodeGenOpts.VerifyEach, PrintPassOpts);
+   SI.registerCallbacks(PIC, &MAM);
++#ifdef GLASSJAR_O0_ONLY
++  PGOOpt.reset(); // glassjar: no profile instrumentation or use.
++#endif
+   PassBuilder PB(TM.get(), PTO, PGOOpt, &PIC, CI.getVirtualFileSystemPtr());
+ 
+   // Handle the assignment tracking feature options.
+@@ -1112,6 +1118,12 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
+       });
+     }
+ 
++#ifdef GLASSJAR_O0_ONLY
++    // glassjar: only the -O0 pipeline is linked into this build.
++    (void)PrepareForThinLTO;
++    (void)PrepareForLTO;
++    MPM.addPass(PB.buildO0DefaultPipeline(Level, ThinOrFullLTOPhase::None));
++#else
+     if (CodeGenOpts.FatLTO) {
+       MPM.addPass(PB.buildFatLTODefaultPipeline(
+           Level, PrepareForThinLTO,
+@@ -1123,6 +1135,7 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
+     } else {
+       MPM.addPass(PB.buildPerModuleDefaultPipeline(Level));
+     }
++#endif
+   }
+ 
+   // Link against bitcodes supplied via the -mlink-builtin-bitcode option
+@@ -1141,8 +1154,16 @@ void EmitAssemblyHelper::RunOptimizationPipeline(
+   if (!actionRequiresCodeGen(Action) && CodeGenOpts.VerifyModule)
+     MPM.addPass(VerifierPass());
+ 
++#ifdef GLASSJAR_TINY
++  // glassjar: textual IR only; no bitcode writer in this build.
++  if (Action == Backend_EmitLL)
++    MPM.addPass(PrintModulePass(*OS, "", CodeGenOpts.EmitLLVMUseLists,
++                                /*EmitLTOSummary=*/false));
++  if (false) {
++#else
+   if (Action == Backend_EmitBC || Action == Backend_EmitLL ||
+       CodeGenOpts.FatLTO) {
++#endif
+     if (CodeGenOpts.PrepareForThinLTO && !CodeGenOpts.DisableLLVMPasses) {
+       if (!TheModule->getModuleFlag("EnableSplitLTOUnit"))
+         TheModule->addModuleFlag(llvm::Module::Error, "EnableSplitLTOUnit",
+@@ -1430,7 +1451,25 @@ void clang::emitBackendOutput(CompilerInstance &CI, CodeGenOptions &CGOpts,
+   DiagnosticsEngine &Diags = CI.getDiagnostics();
+ 
+   std::unique_ptr<llvm::Module> EmptyModule;
++#ifdef GLASSJAR_O0_ONLY
++  if (CGOpts.OptimizationLevel != 0) {
++    Diags.Report(Diags.getCustomDiagID(
++        DiagnosticsEngine::Error,
++        "this build of clang only compiles at -O0"));
++    return;
++  }
++#endif
++#ifdef GLASSJAR_TINY
++  if (!CGOpts.ThinLTOIndexFile.empty() || Action == Backend_EmitBC) {
++    Diags.Report(Diags.getCustomDiagID(
++        DiagnosticsEngine::Error,
++        "this build of clang does not read or write LLVM bitcode"));
++    return;
++  }
++  if (false) {
++#else
+   if (!CGOpts.ThinLTOIndexFile.empty()) {
++#endif
+     // FIXME(sandboxing): Figure out how to support distributed indexing.
+     auto BypassSandbox = sys::sandbox::scopedDisable();
+     // If we are performing a ThinLTO importing compile, load the function index
+@@ -1488,6 +1527,9 @@ void clang::EmbedBitcode(llvm::Module *M, const CodeGenOptions &CGOpts,
+                          llvm::MemoryBufferRef Buf) {
+   if (CGOpts.getEmbedBitcode() == CodeGenOptions::Embed_Off)
+     return;
++#ifdef GLASSJAR_TINY
++  return;
++#endif
+   llvm::embedBitcodeInModule(
+       *M, Buf, CGOpts.getEmbedBitcode() != CodeGenOptions::Embed_Marker,
+       CGOpts.getEmbedBitcode() != CodeGenOptions::Embed_Bitcode,
+diff --git a/clang/lib/CodeGen/CGDecl.cpp b/clang/lib/CodeGen/CGDecl.cpp
+index 8b1cd83af2..c4b18e5791 100644
+--- a/clang/lib/CodeGen/CGDecl.cpp
++++ b/clang/lib/CodeGen/CGDecl.cpp
+@@ -178,12 +178,12 @@ void CodeGenFunction::EmitDecl(const Decl &D, bool EvaluateConditionDecl) {
+   case Decl::OMPDeclareReduction:
+     return CGM.EmitOMPDeclareReduction(cast<OMPDeclareReductionDecl>(&D), this);
+ 
+-  case Decl::OMPDeclareMapper:
++  case Decl::OMPDeclareMapper: GLASSJAR_NEVER_BUILT_DECL(OMPDeclareMapper)
+     return CGM.EmitOMPDeclareMapper(cast<OMPDeclareMapperDecl>(&D), this);
+ 
+-  case Decl::OpenACCDeclare:
++  case Decl::OpenACCDeclare: GLASSJAR_NEVER_BUILT_DECL(OpenACCDeclare)
+     return CGM.EmitOpenACCDeclare(cast<OpenACCDeclareDecl>(&D), this);
+-  case Decl::OpenACCRoutine:
++  case Decl::OpenACCRoutine: GLASSJAR_NEVER_BUILT_DECL(OpenACCRoutine)
+     return CGM.EmitOpenACCRoutine(cast<OpenACCRoutineDecl>(&D), this);
+ 
+   case Decl::Typedef:      // typedef int X;
+diff --git a/clang/lib/CodeGen/CGExpr.cpp b/clang/lib/CodeGen/CGExpr.cpp
+index 24878710d6..7fdbdbef11 100644
+--- a/clang/lib/CodeGen/CGExpr.cpp
++++ b/clang/lib/CodeGen/CGExpr.cpp
+@@ -1718,12 +1718,12 @@ LValue CodeGenFunction::EmitLValueHelper(const Expr *E,
+   switch (E->getStmtClass()) {
+   default: return EmitUnsupportedLValue(E, "l-value expression");
+ 
+-  case Expr::ObjCPropertyRefExprClass:
++  case Expr::ObjCPropertyRefExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCPropertyRefExpr)
+     llvm_unreachable("cannot emit a property reference directly");
+ 
+-  case Expr::ObjCSelectorExprClass:
++  case Expr::ObjCSelectorExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCSelectorExpr)
+     return EmitObjCSelectorLValue(cast<ObjCSelectorExpr>(E));
+-  case Expr::ObjCIsaExprClass:
++  case Expr::ObjCIsaExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCIsaExpr)
+     return EmitObjCIsaExpr(cast<ObjCIsaExpr>(E));
+   case Expr::BinaryOperatorClass:
+     return EmitBinaryOperatorLValue(cast<BinaryOperator>(E));
+@@ -1762,7 +1762,7 @@ LValue CodeGenFunction::EmitLValueHelper(const Expr *E,
+     return EmitPredefinedLValue(cast<PredefinedExpr>(E));
+   case Expr::StringLiteralClass:
+     return EmitStringLiteralLValue(cast<StringLiteral>(E));
+-  case Expr::ObjCEncodeExprClass:
++  case Expr::ObjCEncodeExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCEncodeExpr)
+     return EmitObjCEncodeExprLValue(cast<ObjCEncodeExpr>(E));
+   case Expr::PseudoObjectExprClass:
+     return EmitPseudoObjectLValue(cast<PseudoObjectExpr>(E));
+@@ -1810,9 +1810,9 @@ LValue CodeGenFunction::EmitLValueHelper(const Expr *E,
+   case Expr::CXXTypeidExprClass:
+     return EmitCXXTypeidLValue(cast<CXXTypeidExpr>(E));
+ 
+-  case Expr::ObjCMessageExprClass:
++  case Expr::ObjCMessageExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCMessageExpr)
+     return EmitObjCMessageExprLValue(cast<ObjCMessageExpr>(E));
+-  case Expr::ObjCIvarRefExprClass:
++  case Expr::ObjCIvarRefExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCIvarRefExpr)
+     return EmitObjCIvarRefLValue(cast<ObjCIvarRefExpr>(E));
+   case Expr::StmtExprClass:
+     return EmitStmtExprLValue(cast<StmtExpr>(E));
+@@ -1824,7 +1824,7 @@ LValue CodeGenFunction::EmitLValueHelper(const Expr *E,
+     return EmitMatrixSingleSubscriptExpr(cast<MatrixSingleSubscriptExpr>(E));
+   case Expr::MatrixSubscriptExprClass:
+     return EmitMatrixSubscriptExpr(cast<MatrixSubscriptExpr>(E));
+-  case Expr::ArraySectionExprClass:
++  case Expr::ArraySectionExprClass: GLASSJAR_NEVER_BUILT_STMT(ArraySectionExpr)
+     return EmitArraySectionExpr(cast<ArraySectionExpr>(E));
+   case Expr::ExtVectorElementExprClass:
+     return EmitExtVectorElementExpr(cast<ExtVectorElementExpr>(E));
+@@ -1865,7 +1865,7 @@ LValue CodeGenFunction::EmitLValueHelper(const Expr *E,
+     return EmitCoyieldLValue(cast<CoyieldExpr>(E));
+   case Expr::PackIndexingExprClass:
+     return EmitLValue(cast<PackIndexingExpr>(E)->getSelectedExpr());
+-  case Expr::HLSLOutArgExprClass:
++  case Expr::HLSLOutArgExprClass: GLASSJAR_NEVER_BUILT_STMT(HLSLOutArgExpr)
+     llvm_unreachable("cannot emit a HLSL out argument directly");
+   }
+ }
+diff --git a/clang/lib/CodeGen/CGStmt.cpp b/clang/lib/CodeGen/CGStmt.cpp
+index c050fd41ac..49d1bb8797 100644
+--- a/clang/lib/CodeGen/CGStmt.cpp
++++ b/clang/lib/CodeGen/CGStmt.cpp
+@@ -177,10 +177,10 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
+     EmitCapturedStmt(*CS, CS->getCapturedRegionKind());
+     }
+     break;
+-  case Stmt::ObjCAtTryStmtClass:
++  case Stmt::ObjCAtTryStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAtTryStmt)
+     EmitObjCAtTryStmt(cast<ObjCAtTryStmt>(*S));
+     break;
+-  case Stmt::ObjCAtCatchStmtClass:
++  case Stmt::ObjCAtCatchStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAtCatchStmt)
+     llvm_unreachable(
+                     "@catch statements should be handled by EmitObjCAtTryStmt");
+   case Stmt::ObjCAtFinallyStmtClass:
+@@ -189,13 +189,13 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
+   case Stmt::ObjCAtThrowStmtClass:
+     EmitObjCAtThrowStmt(cast<ObjCAtThrowStmt>(*S));
+     break;
+-  case Stmt::ObjCAtSynchronizedStmtClass:
++  case Stmt::ObjCAtSynchronizedStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAtSynchronizedStmt)
+     EmitObjCAtSynchronizedStmt(cast<ObjCAtSynchronizedStmt>(*S));
+     break;
+-  case Stmt::ObjCForCollectionStmtClass:
++  case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+     EmitObjCForCollectionStmt(cast<ObjCForCollectionStmt>(*S));
+     break;
+-  case Stmt::ObjCAutoreleasePoolStmtClass:
++  case Stmt::ObjCAutoreleasePoolStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCAutoreleasePoolStmt)
+     EmitObjCAutoreleasePoolStmt(cast<ObjCAutoreleasePoolStmt>(*S));
+     break;
+ 
+@@ -208,299 +208,299 @@ void CodeGenFunction::EmitStmt(const Stmt *S, ArrayRef<const Attr *> Attrs) {
+   case Stmt::SEHTryStmtClass:
+     EmitSEHTryStmt(cast<SEHTryStmt>(*S));
+     break;
+-  case Stmt::OMPMetaDirectiveClass:
++  case Stmt::OMPMetaDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMetaDirective)
+     EmitOMPMetaDirective(cast<OMPMetaDirective>(*S));
+     break;
+-  case Stmt::OMPCanonicalLoopClass:
++  case Stmt::OMPCanonicalLoopClass: GLASSJAR_NEVER_BUILT_STMT(OMPCanonicalLoop)
+     EmitOMPCanonicalLoop(cast<OMPCanonicalLoop>(S));
+     break;
+-  case Stmt::OMPParallelDirectiveClass:
++  case Stmt::OMPParallelDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelDirective)
+     EmitOMPParallelDirective(cast<OMPParallelDirective>(*S));
+     break;
+-  case Stmt::OMPSimdDirectiveClass:
++  case Stmt::OMPSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSimdDirective)
+     EmitOMPSimdDirective(cast<OMPSimdDirective>(*S));
+     break;
+-  case Stmt::OMPTileDirectiveClass:
++  case Stmt::OMPTileDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTileDirective)
+     EmitOMPTileDirective(cast<OMPTileDirective>(*S));
+     break;
+-  case Stmt::OMPStripeDirectiveClass:
++  case Stmt::OMPStripeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPStripeDirective)
+     EmitOMPStripeDirective(cast<OMPStripeDirective>(*S));
+     break;
+-  case Stmt::OMPUnrollDirectiveClass:
++  case Stmt::OMPUnrollDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPUnrollDirective)
+     EmitOMPUnrollDirective(cast<OMPUnrollDirective>(*S));
+     break;
+-  case Stmt::OMPReverseDirectiveClass:
++  case Stmt::OMPReverseDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPReverseDirective)
+     EmitOMPReverseDirective(cast<OMPReverseDirective>(*S));
+     break;
+-  case Stmt::OMPInterchangeDirectiveClass:
++  case Stmt::OMPInterchangeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPInterchangeDirective)
+     EmitOMPInterchangeDirective(cast<OMPInterchangeDirective>(*S));
+     break;
+-  case Stmt::OMPFuseDirectiveClass:
++  case Stmt::OMPFuseDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPFuseDirective)
+     EmitOMPFuseDirective(cast<OMPFuseDirective>(*S));
+     break;
+-  case Stmt::OMPForDirectiveClass:
++  case Stmt::OMPForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPForDirective)
+     EmitOMPForDirective(cast<OMPForDirective>(*S));
+     break;
+-  case Stmt::OMPForSimdDirectiveClass:
++  case Stmt::OMPForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPForSimdDirective)
+     EmitOMPForSimdDirective(cast<OMPForSimdDirective>(*S));
+     break;
+-  case Stmt::OMPSectionsDirectiveClass:
++  case Stmt::OMPSectionsDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSectionsDirective)
+     EmitOMPSectionsDirective(cast<OMPSectionsDirective>(*S));
+     break;
+-  case Stmt::OMPSectionDirectiveClass:
++  case Stmt::OMPSectionDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSectionDirective)
+     EmitOMPSectionDirective(cast<OMPSectionDirective>(*S));
+     break;
+-  case Stmt::OMPSingleDirectiveClass:
++  case Stmt::OMPSingleDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPSingleDirective)
+     EmitOMPSingleDirective(cast<OMPSingleDirective>(*S));
+     break;
+-  case Stmt::OMPMasterDirectiveClass:
++  case Stmt::OMPMasterDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMasterDirective)
+     EmitOMPMasterDirective(cast<OMPMasterDirective>(*S));
+     break;
+-  case Stmt::OMPCriticalDirectiveClass:
++  case Stmt::OMPCriticalDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPCriticalDirective)
+     EmitOMPCriticalDirective(cast<OMPCriticalDirective>(*S));
+     break;
+-  case Stmt::OMPParallelForDirectiveClass:
++  case Stmt::OMPParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelForDirective)
+     EmitOMPParallelForDirective(cast<OMPParallelForDirective>(*S));
+     break;
+-  case Stmt::OMPParallelForSimdDirectiveClass:
++  case Stmt::OMPParallelForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelForSimdDirective)
+     EmitOMPParallelForSimdDirective(cast<OMPParallelForSimdDirective>(*S));
+     break;
+-  case Stmt::OMPParallelMasterDirectiveClass:
++  case Stmt::OMPParallelMasterDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelMasterDirective)
+     EmitOMPParallelMasterDirective(cast<OMPParallelMasterDirective>(*S));
+     break;
+-  case Stmt::OMPParallelSectionsDirectiveClass:
++  case Stmt::OMPParallelSectionsDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelSectionsDirective)
+     EmitOMPParallelSectionsDirective(cast<OMPParallelSectionsDirective>(*S));
+     break;
+-  case Stmt::OMPTaskDirectiveClass:
++  case Stmt::OMPTaskDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskDirective)
+     EmitOMPTaskDirective(cast<OMPTaskDirective>(*S));
+     break;
+-  case Stmt::OMPTaskyieldDirectiveClass:
++  case Stmt::OMPTaskyieldDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskyieldDirective)
+     EmitOMPTaskyieldDirective(cast<OMPTaskyieldDirective>(*S));
+     break;
+-  case Stmt::OMPErrorDirectiveClass:
++  case Stmt::OMPErrorDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPErrorDirective)
+     EmitOMPErrorDirective(cast<OMPErrorDirective>(*S));
+     break;
+-  case Stmt::OMPBarrierDirectiveClass:
++  case Stmt::OMPBarrierDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPBarrierDirective)
+     EmitOMPBarrierDirective(cast<OMPBarrierDirective>(*S));
+     break;
+-  case Stmt::OMPTaskwaitDirectiveClass:
++  case Stmt::OMPTaskwaitDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskwaitDirective)
+     EmitOMPTaskwaitDirective(cast<OMPTaskwaitDirective>(*S));
+     break;
+-  case Stmt::OMPTaskgroupDirectiveClass:
++  case Stmt::OMPTaskgroupDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskgroupDirective)
+     EmitOMPTaskgroupDirective(cast<OMPTaskgroupDirective>(*S));
+     break;
+-  case Stmt::OMPFlushDirectiveClass:
++  case Stmt::OMPFlushDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPFlushDirective)
+     EmitOMPFlushDirective(cast<OMPFlushDirective>(*S));
+     break;
+-  case Stmt::OMPDepobjDirectiveClass:
++  case Stmt::OMPDepobjDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDepobjDirective)
+     EmitOMPDepobjDirective(cast<OMPDepobjDirective>(*S));
+     break;
+-  case Stmt::OMPScanDirectiveClass:
++  case Stmt::OMPScanDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPScanDirective)
+     EmitOMPScanDirective(cast<OMPScanDirective>(*S));
+     break;
+-  case Stmt::OMPOrderedDirectiveClass:
++  case Stmt::OMPOrderedDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPOrderedDirective)
+     EmitOMPOrderedDirective(cast<OMPOrderedDirective>(*S));
+     break;
+-  case Stmt::OMPAtomicDirectiveClass:
++  case Stmt::OMPAtomicDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPAtomicDirective)
+     EmitOMPAtomicDirective(cast<OMPAtomicDirective>(*S));
+     break;
+-  case Stmt::OMPTargetDirectiveClass:
++  case Stmt::OMPTargetDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetDirective)
+     EmitOMPTargetDirective(cast<OMPTargetDirective>(*S));
+     break;
+-  case Stmt::OMPTeamsDirectiveClass:
++  case Stmt::OMPTeamsDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsDirective)
+     EmitOMPTeamsDirective(cast<OMPTeamsDirective>(*S));
+     break;
+-  case Stmt::OMPCancellationPointDirectiveClass:
++  case Stmt::OMPCancellationPointDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPCancellationPointDirective)
+     EmitOMPCancellationPointDirective(cast<OMPCancellationPointDirective>(*S));
+     break;
+-  case Stmt::OMPCancelDirectiveClass:
++  case Stmt::OMPCancelDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPCancelDirective)
+     EmitOMPCancelDirective(cast<OMPCancelDirective>(*S));
+     break;
+-  case Stmt::OMPTargetDataDirectiveClass:
++  case Stmt::OMPTargetDataDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetDataDirective)
+     EmitOMPTargetDataDirective(cast<OMPTargetDataDirective>(*S));
+     break;
+-  case Stmt::OMPTargetEnterDataDirectiveClass:
++  case Stmt::OMPTargetEnterDataDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetEnterDataDirective)
+     EmitOMPTargetEnterDataDirective(cast<OMPTargetEnterDataDirective>(*S));
+     break;
+-  case Stmt::OMPTargetExitDataDirectiveClass:
++  case Stmt::OMPTargetExitDataDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetExitDataDirective)
+     EmitOMPTargetExitDataDirective(cast<OMPTargetExitDataDirective>(*S));
+     break;
+-  case Stmt::OMPTargetParallelDirectiveClass:
++  case Stmt::OMPTargetParallelDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetParallelDirective)
+     EmitOMPTargetParallelDirective(cast<OMPTargetParallelDirective>(*S));
+     break;
+-  case Stmt::OMPTargetParallelForDirectiveClass:
++  case Stmt::OMPTargetParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetParallelForDirective)
+     EmitOMPTargetParallelForDirective(cast<OMPTargetParallelForDirective>(*S));
+     break;
+-  case Stmt::OMPTaskLoopDirectiveClass:
++  case Stmt::OMPTaskLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskLoopDirective)
+     EmitOMPTaskLoopDirective(cast<OMPTaskLoopDirective>(*S));
+     break;
+-  case Stmt::OMPTaskLoopSimdDirectiveClass:
++  case Stmt::OMPTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTaskLoopSimdDirective)
+     EmitOMPTaskLoopSimdDirective(cast<OMPTaskLoopSimdDirective>(*S));
+     break;
+-  case Stmt::OMPMasterTaskLoopDirectiveClass:
++  case Stmt::OMPMasterTaskLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMasterTaskLoopDirective)
+     EmitOMPMasterTaskLoopDirective(cast<OMPMasterTaskLoopDirective>(*S));
+     break;
+-  case Stmt::OMPMaskedTaskLoopDirectiveClass:
++  case Stmt::OMPMaskedTaskLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMaskedTaskLoopDirective)
+     EmitOMPMaskedTaskLoopDirective(cast<OMPMaskedTaskLoopDirective>(*S));
+     break;
+-  case Stmt::OMPMasterTaskLoopSimdDirectiveClass:
++  case Stmt::OMPMasterTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMasterTaskLoopSimdDirective)
+     EmitOMPMasterTaskLoopSimdDirective(
+         cast<OMPMasterTaskLoopSimdDirective>(*S));
+     break;
+-  case Stmt::OMPMaskedTaskLoopSimdDirectiveClass:
++  case Stmt::OMPMaskedTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMaskedTaskLoopSimdDirective)
+     EmitOMPMaskedTaskLoopSimdDirective(
+         cast<OMPMaskedTaskLoopSimdDirective>(*S));
+     break;
+-  case Stmt::OMPParallelMasterTaskLoopDirectiveClass:
++  case Stmt::OMPParallelMasterTaskLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelMasterTaskLoopDirective)
+     EmitOMPParallelMasterTaskLoopDirective(
+         cast<OMPParallelMasterTaskLoopDirective>(*S));
+     break;
+-  case Stmt::OMPParallelMaskedTaskLoopDirectiveClass:
++  case Stmt::OMPParallelMaskedTaskLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelMaskedTaskLoopDirective)
+     EmitOMPParallelMaskedTaskLoopDirective(
+         cast<OMPParallelMaskedTaskLoopDirective>(*S));
+     break;
+-  case Stmt::OMPParallelMasterTaskLoopSimdDirectiveClass:
++  case Stmt::OMPParallelMasterTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelMasterTaskLoopSimdDirective)
+     EmitOMPParallelMasterTaskLoopSimdDirective(
+         cast<OMPParallelMasterTaskLoopSimdDirective>(*S));
+     break;
+-  case Stmt::OMPParallelMaskedTaskLoopSimdDirectiveClass:
++  case Stmt::OMPParallelMaskedTaskLoopSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelMaskedTaskLoopSimdDirective)
+     EmitOMPParallelMaskedTaskLoopSimdDirective(
+         cast<OMPParallelMaskedTaskLoopSimdDirective>(*S));
+     break;
+-  case Stmt::OMPDistributeDirectiveClass:
++  case Stmt::OMPDistributeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDistributeDirective)
+     EmitOMPDistributeDirective(cast<OMPDistributeDirective>(*S));
+     break;
+-  case Stmt::OMPTargetUpdateDirectiveClass:
++  case Stmt::OMPTargetUpdateDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetUpdateDirective)
+     EmitOMPTargetUpdateDirective(cast<OMPTargetUpdateDirective>(*S));
+     break;
+-  case Stmt::OMPDistributeParallelForDirectiveClass:
++  case Stmt::OMPDistributeParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDistributeParallelForDirective)
+     EmitOMPDistributeParallelForDirective(
+         cast<OMPDistributeParallelForDirective>(*S));
+     break;
+-  case Stmt::OMPDistributeParallelForSimdDirectiveClass:
++  case Stmt::OMPDistributeParallelForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDistributeParallelForSimdDirective)
+     EmitOMPDistributeParallelForSimdDirective(
+         cast<OMPDistributeParallelForSimdDirective>(*S));
+     break;
+-  case Stmt::OMPDistributeSimdDirectiveClass:
++  case Stmt::OMPDistributeSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDistributeSimdDirective)
+     EmitOMPDistributeSimdDirective(cast<OMPDistributeSimdDirective>(*S));
+     break;
+-  case Stmt::OMPTargetParallelForSimdDirectiveClass:
++  case Stmt::OMPTargetParallelForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetParallelForSimdDirective)
+     EmitOMPTargetParallelForSimdDirective(
+         cast<OMPTargetParallelForSimdDirective>(*S));
+     break;
+-  case Stmt::OMPTargetSimdDirectiveClass:
++  case Stmt::OMPTargetSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetSimdDirective)
+     EmitOMPTargetSimdDirective(cast<OMPTargetSimdDirective>(*S));
+     break;
+-  case Stmt::OMPTeamsDistributeDirectiveClass:
++  case Stmt::OMPTeamsDistributeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsDistributeDirective)
+     EmitOMPTeamsDistributeDirective(cast<OMPTeamsDistributeDirective>(*S));
+     break;
+-  case Stmt::OMPTeamsDistributeSimdDirectiveClass:
++  case Stmt::OMPTeamsDistributeSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsDistributeSimdDirective)
+     EmitOMPTeamsDistributeSimdDirective(
+         cast<OMPTeamsDistributeSimdDirective>(*S));
+     break;
+-  case Stmt::OMPTeamsDistributeParallelForSimdDirectiveClass:
++  case Stmt::OMPTeamsDistributeParallelForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsDistributeParallelForSimdDirective)
+     EmitOMPTeamsDistributeParallelForSimdDirective(
+         cast<OMPTeamsDistributeParallelForSimdDirective>(*S));
+     break;
+-  case Stmt::OMPTeamsDistributeParallelForDirectiveClass:
++  case Stmt::OMPTeamsDistributeParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsDistributeParallelForDirective)
+     EmitOMPTeamsDistributeParallelForDirective(
+         cast<OMPTeamsDistributeParallelForDirective>(*S));
+     break;
+-  case Stmt::OMPTargetTeamsDirectiveClass:
++  case Stmt::OMPTargetTeamsDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsDirective)
+     EmitOMPTargetTeamsDirective(cast<OMPTargetTeamsDirective>(*S));
+     break;
+-  case Stmt::OMPTargetTeamsDistributeDirectiveClass:
++  case Stmt::OMPTargetTeamsDistributeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsDistributeDirective)
+     EmitOMPTargetTeamsDistributeDirective(
+         cast<OMPTargetTeamsDistributeDirective>(*S));
+     break;
+-  case Stmt::OMPTargetTeamsDistributeParallelForDirectiveClass:
++  case Stmt::OMPTargetTeamsDistributeParallelForDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsDistributeParallelForDirective)
+     EmitOMPTargetTeamsDistributeParallelForDirective(
+         cast<OMPTargetTeamsDistributeParallelForDirective>(*S));
+     break;
+-  case Stmt::OMPTargetTeamsDistributeParallelForSimdDirectiveClass:
++  case Stmt::OMPTargetTeamsDistributeParallelForSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsDistributeParallelForSimdDirective)
+     EmitOMPTargetTeamsDistributeParallelForSimdDirective(
+         cast<OMPTargetTeamsDistributeParallelForSimdDirective>(*S));
+     break;
+-  case Stmt::OMPTargetTeamsDistributeSimdDirectiveClass:
++  case Stmt::OMPTargetTeamsDistributeSimdDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsDistributeSimdDirective)
+     EmitOMPTargetTeamsDistributeSimdDirective(
+         cast<OMPTargetTeamsDistributeSimdDirective>(*S));
+     break;
+-  case Stmt::OMPInteropDirectiveClass:
++  case Stmt::OMPInteropDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPInteropDirective)
+     EmitOMPInteropDirective(cast<OMPInteropDirective>(*S));
+     break;
+-  case Stmt::OMPDispatchDirectiveClass:
++  case Stmt::OMPDispatchDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPDispatchDirective)
+     CGM.ErrorUnsupported(S, "OpenMP dispatch directive");
+     break;
+-  case Stmt::OMPScopeDirectiveClass:
++  case Stmt::OMPScopeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPScopeDirective)
+     EmitOMPScopeDirective(cast<OMPScopeDirective>(*S));
+     break;
+-  case Stmt::OMPMaskedDirectiveClass:
++  case Stmt::OMPMaskedDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPMaskedDirective)
+     EmitOMPMaskedDirective(cast<OMPMaskedDirective>(*S));
+     break;
+-  case Stmt::OMPGenericLoopDirectiveClass:
++  case Stmt::OMPGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPGenericLoopDirective)
+     EmitOMPGenericLoopDirective(cast<OMPGenericLoopDirective>(*S));
+     break;
+-  case Stmt::OMPTeamsGenericLoopDirectiveClass:
++  case Stmt::OMPTeamsGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTeamsGenericLoopDirective)
+     EmitOMPTeamsGenericLoopDirective(cast<OMPTeamsGenericLoopDirective>(*S));
+     break;
+-  case Stmt::OMPTargetTeamsGenericLoopDirectiveClass:
++  case Stmt::OMPTargetTeamsGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetTeamsGenericLoopDirective)
+     EmitOMPTargetTeamsGenericLoopDirective(
+         cast<OMPTargetTeamsGenericLoopDirective>(*S));
+     break;
+-  case Stmt::OMPParallelGenericLoopDirectiveClass:
++  case Stmt::OMPParallelGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelGenericLoopDirective)
+     EmitOMPParallelGenericLoopDirective(
+         cast<OMPParallelGenericLoopDirective>(*S));
+     break;
+-  case Stmt::OMPTargetParallelGenericLoopDirectiveClass:
++  case Stmt::OMPTargetParallelGenericLoopDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPTargetParallelGenericLoopDirective)
+     EmitOMPTargetParallelGenericLoopDirective(
+         cast<OMPTargetParallelGenericLoopDirective>(*S));
+     break;
+-  case Stmt::OMPParallelMaskedDirectiveClass:
++  case Stmt::OMPParallelMaskedDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPParallelMaskedDirective)
+     EmitOMPParallelMaskedDirective(cast<OMPParallelMaskedDirective>(*S));
+     break;
+-  case Stmt::OMPAssumeDirectiveClass:
++  case Stmt::OMPAssumeDirectiveClass: GLASSJAR_NEVER_BUILT_STMT(OMPAssumeDirective)
+     EmitOMPAssumeDirective(cast<OMPAssumeDirective>(*S));
+     break;
+-  case Stmt::OpenACCComputeConstructClass:
++  case Stmt::OpenACCComputeConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCComputeConstruct)
+     EmitOpenACCComputeConstruct(cast<OpenACCComputeConstruct>(*S));
+     break;
+-  case Stmt::OpenACCLoopConstructClass:
++  case Stmt::OpenACCLoopConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCLoopConstruct)
+     EmitOpenACCLoopConstruct(cast<OpenACCLoopConstruct>(*S));
+     break;
+-  case Stmt::OpenACCCombinedConstructClass:
++  case Stmt::OpenACCCombinedConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCCombinedConstruct)
+     EmitOpenACCCombinedConstruct(cast<OpenACCCombinedConstruct>(*S));
+     break;
+-  case Stmt::OpenACCDataConstructClass:
++  case Stmt::OpenACCDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCDataConstruct)
+     EmitOpenACCDataConstruct(cast<OpenACCDataConstruct>(*S));
+     break;
+-  case Stmt::OpenACCEnterDataConstructClass:
++  case Stmt::OpenACCEnterDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCEnterDataConstruct)
+     EmitOpenACCEnterDataConstruct(cast<OpenACCEnterDataConstruct>(*S));
+     break;
+-  case Stmt::OpenACCExitDataConstructClass:
++  case Stmt::OpenACCExitDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCExitDataConstruct)
+     EmitOpenACCExitDataConstruct(cast<OpenACCExitDataConstruct>(*S));
+     break;
+-  case Stmt::OpenACCHostDataConstructClass:
++  case Stmt::OpenACCHostDataConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCHostDataConstruct)
+     EmitOpenACCHostDataConstruct(cast<OpenACCHostDataConstruct>(*S));
+     break;
+-  case Stmt::OpenACCWaitConstructClass:
++  case Stmt::OpenACCWaitConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCWaitConstruct)
+     EmitOpenACCWaitConstruct(cast<OpenACCWaitConstruct>(*S));
+     break;
+-  case Stmt::OpenACCInitConstructClass:
++  case Stmt::OpenACCInitConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCInitConstruct)
+     EmitOpenACCInitConstruct(cast<OpenACCInitConstruct>(*S));
+     break;
+-  case Stmt::OpenACCShutdownConstructClass:
++  case Stmt::OpenACCShutdownConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCShutdownConstruct)
+     EmitOpenACCShutdownConstruct(cast<OpenACCShutdownConstruct>(*S));
+     break;
+-  case Stmt::OpenACCSetConstructClass:
++  case Stmt::OpenACCSetConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCSetConstruct)
+     EmitOpenACCSetConstruct(cast<OpenACCSetConstruct>(*S));
+     break;
+-  case Stmt::OpenACCUpdateConstructClass:
++  case Stmt::OpenACCUpdateConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCUpdateConstruct)
+     EmitOpenACCUpdateConstruct(cast<OpenACCUpdateConstruct>(*S));
+     break;
+-  case Stmt::OpenACCAtomicConstructClass:
++  case Stmt::OpenACCAtomicConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCAtomicConstruct)
+     EmitOpenACCAtomicConstruct(cast<OpenACCAtomicConstruct>(*S));
+     break;
+-  case Stmt::OpenACCCacheConstructClass:
++  case Stmt::OpenACCCacheConstructClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCCacheConstruct)
+     EmitOpenACCCacheConstruct(cast<OpenACCCacheConstruct>(*S));
+     break;
+   }
+@@ -546,7 +546,7 @@ bool CodeGenFunction::EmitSimpleStmt(const Stmt *S,
+   case Stmt::SEHLeaveStmtClass:
+     EmitSEHLeaveStmt(cast<SEHLeaveStmt>(*S));
+     break;
+-  case Stmt::SYCLKernelCallStmtClass:
++  case Stmt::SYCLKernelCallStmtClass: GLASSJAR_NEVER_BUILT_STMT(SYCLKernelCallStmt)
+     // SYCL kernel call statements are generated as wrappers around the body
+     // of functions declared with the sycl_kernel_entry_point attribute. Such
+     // functions are used to specify how a SYCL kernel (a function object) is
+diff --git a/clang/lib/CodeGen/CodeGenAction.cpp b/clang/lib/CodeGen/CodeGenAction.cpp
+index a5ef4ac9d3..c9bace5156 100644
+--- a/clang/lib/CodeGen/CodeGenAction.cpp
++++ b/clang/lib/CodeGen/CodeGenAction.cpp
+@@ -872,6 +872,15 @@ CodeGenAction::~CodeGenAction() {
+ bool CodeGenAction::loadLinkModules(CompilerInstance &CI) {
+   if (!LinkModules.empty())
+     return false;
++#ifdef GLASSJAR_TINY
++  if (!CI.getCodeGenOpts().LinkBitcodeFiles.empty()) {
++    CI.getDiagnostics().Report(CI.getDiagnostics().getCustomDiagID(
++        DiagnosticsEngine::Error,
++        "this build of clang does not read or write LLVM bitcode"));
++    return true;
++  }
++  return false;
++#endif
+ 
+   for (const CodeGenOptions::BitcodeFileToLink &F :
+        CI.getCodeGenOpts().LinkBitcodeFiles) {
+@@ -1107,6 +1116,14 @@ void CodeGenAction::ExecuteAction() {
+     this->ASTFrontendAction::ExecuteAction();
+     return;
+   }
++#ifdef GLASSJAR_TINY
++  // glassjar: no IR or bitcode parser in this build.
++  getCompilerInstance().getDiagnostics().Report(
++      getCompilerInstance().getDiagnostics().getCustomDiagID(
++          DiagnosticsEngine::Error,
++          "this build of clang does not compile LLVM IR input"));
++  return;
++#endif
+ 
+   // If this is an IR file, we have to treat it specially.
+   BackendAction BA = static_cast<BackendAction>(Act);
+diff --git a/clang/lib/CodeGen/CodeGenModule.cpp b/clang/lib/CodeGen/CodeGenModule.cpp
+index 85ed38f144..3c26330650 100644
+--- a/clang/lib/CodeGen/CodeGenModule.cpp
++++ b/clang/lib/CodeGen/CodeGenModule.cpp
+@@ -7553,7 +7553,7 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
+ 
+   // Forward declarations, no (immediate) code generation.
+   case Decl::ObjCInterface:
+-  case Decl::ObjCCategory:
++  case Decl::ObjCCategory: GLASSJAR_NEVER_BUILT_DECL(ObjCCategory)
+     break;
+ 
+   case Decl::ObjCProtocol: {
+@@ -7695,23 +7695,23 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
+     EmitDeclContext(cast<ExportDecl>(D));
+     break;
+ 
+-  case Decl::OMPThreadPrivate:
++  case Decl::OMPThreadPrivate: GLASSJAR_NEVER_BUILT_DECL(OMPThreadPrivate)
+     EmitOMPThreadPrivateDecl(cast<OMPThreadPrivateDecl>(D));
+     break;
+ 
+-  case Decl::OMPAllocate:
++  case Decl::OMPAllocate: GLASSJAR_NEVER_BUILT_DECL(OMPAllocate)
+     EmitOMPAllocateDecl(cast<OMPAllocateDecl>(D));
+     break;
+ 
+-  case Decl::OMPDeclareReduction:
++  case Decl::OMPDeclareReduction: GLASSJAR_NEVER_BUILT_DECL(OMPDeclareReduction)
+     EmitOMPDeclareReduction(cast<OMPDeclareReductionDecl>(D));
+     break;
+ 
+-  case Decl::OMPDeclareMapper:
++  case Decl::OMPDeclareMapper: GLASSJAR_NEVER_BUILT_DECL(OMPDeclareMapper)
+     EmitOMPDeclareMapper(cast<OMPDeclareMapperDecl>(D));
+     break;
+ 
+-  case Decl::OMPRequires:
++  case Decl::OMPRequires: GLASSJAR_NEVER_BUILT_DECL(OMPRequires)
+     EmitOMPRequiresDecl(cast<OMPRequiresDecl>(D));
+     break;
+ 
+@@ -7737,17 +7737,17 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
+             getContext().getCanonicalTagType(cast<EnumDecl>(D)));
+     break;
+ 
+-  case Decl::HLSLRootSignature:
++  case Decl::HLSLRootSignature: GLASSJAR_NEVER_BUILT_DECL(HLSLRootSignature)
+     getHLSLRuntime().addRootSignature(cast<HLSLRootSignatureDecl>(D));
+     break;
+-  case Decl::HLSLBuffer:
++  case Decl::HLSLBuffer: GLASSJAR_NEVER_BUILT_DECL(HLSLBuffer)
+     getHLSLRuntime().addBuffer(cast<HLSLBufferDecl>(D));
+     break;
+ 
+-  case Decl::OpenACCDeclare:
++  case Decl::OpenACCDeclare: GLASSJAR_NEVER_BUILT_DECL(OpenACCDeclare)
+     EmitOpenACCDeclare(cast<OpenACCDeclareDecl>(D));
+     break;
+-  case Decl::OpenACCRoutine:
++  case Decl::OpenACCRoutine: GLASSJAR_NEVER_BUILT_DECL(OpenACCRoutine)
+     EmitOpenACCRoutine(cast<OpenACCRoutineDecl>(D));
+     break;
+ 
+diff --git a/clang/lib/CodeGen/CodeGenPGO.cpp b/clang/lib/CodeGen/CodeGenPGO.cpp
+index 359b4e00a9..740edf3e4d 100644
+--- a/clang/lib/CodeGen/CodeGenPGO.cpp
++++ b/clang/lib/CodeGen/CodeGenPGO.cpp
+@@ -496,7 +496,7 @@ struct MapRegionCounters : public RecursiveASTVisitor<MapRegionCounters> {
+       return PGOHash::ForStmt;
+     case Stmt::CXXForRangeStmtClass:
+       return PGOHash::CXXForRangeStmt;
+-    case Stmt::ObjCForCollectionStmtClass:
++    case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+       return PGOHash::ObjCForCollectionStmt;
+     case Stmt::SwitchStmtClass:
+       return PGOHash::SwitchStmt;
+diff --git a/clang/lib/Frontend/CompilerInstance.cpp b/clang/lib/Frontend/CompilerInstance.cpp
+index 088538c744..0e0892de4f 100644
+--- a/clang/lib/Frontend/CompilerInstance.cpp
++++ b/clang/lib/Frontend/CompilerInstance.cpp
+@@ -769,11 +769,13 @@ void CompilerInstance::createSema(TranslationUnitKind TUKind,
+ 
+   // If we're building a module and are supposed to load API notes,
+   // notify the API notes manager.
++#ifndef GLASSJAR_TINY
+   if (auto *currentModule = getPreprocessor().getCurrentModule()) {
+     (void)TheSema->APINotes.loadCurrentModuleAPINotes(
+         currentModule, getLangOpts().APINotesModules,
+         getAPINotesOpts().ModuleSearchPaths);
+   }
++#endif
+ }
+ 
+ // Output Files
+diff --git a/clang/lib/Frontend/CompilerInvocation.cpp b/clang/lib/Frontend/CompilerInvocation.cpp
+index 477406f252..a44d815dfd 100644
+--- a/clang/lib/Frontend/CompilerInvocation.cpp
++++ b/clang/lib/Frontend/CompilerInvocation.cpp
+@@ -5160,7 +5160,7 @@ std::string CompilerInvocation::getModuleHash() const {
+   using CK = LangOptions::CompatibilityKind;
+ #define LANGOPT(Name, Bits, Default, Compatibility, Description)               \
+   if constexpr (CK::Compatibility != CK::Benign)                               \
+-    HBuilder.add(LangOpts->Name);
++    HBuilder.add(static_cast<unsigned>(LangOpts->Name)); // glassjar: Name may be a constant proxy
+ #define ENUM_LANGOPT(Name, Type, Bits, Default, Compatibility, Description)    \
+   if constexpr (CK::Compatibility != CK::Benign)                               \
+     HBuilder.add(static_cast<unsigned>(LangOpts->get##Name()));
+diff --git a/clang/lib/FrontendTool/ExecuteCompilerInvocation.cpp b/clang/lib/FrontendTool/ExecuteCompilerInvocation.cpp
+index 05f646b43e..62fdf1671b 100644
+--- a/clang/lib/FrontendTool/ExecuteCompilerInvocation.cpp
++++ b/clang/lib/FrontendTool/ExecuteCompilerInvocation.cpp
+@@ -60,7 +60,11 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
+   case ASTDeclList:            return std::make_unique<ASTDeclListAction>();
+   case ASTDump:                return std::make_unique<ASTDumpAction>();
+   case ASTPrint:               return std::make_unique<ASTPrintAction>();
++#ifdef GLASSJAR_TINY
++  case ASTView: Action = "ASTView"; break;
++#else
+   case ASTView:                return std::make_unique<ASTViewAction>();
++#endif
+   case DumpCompilerOptions:
+     return std::make_unique<DumpCompilerOptionsAction>();
+   case DumpRawTokens:          return std::make_unique<DumpRawTokensAction>();
+@@ -84,7 +88,11 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
+     CI.getDiagnostics().Report(diag::err_fe_cir_not_built);
+     return nullptr;
+ #endif
++#ifdef GLASSJAR_TINY
++  case EmitHTML: Action = "EmitHTML"; break;
++#else
+   case EmitHTML:               return std::make_unique<HTMLPrintAction>();
++#endif
+   case EmitLLVM: {
+ #if CLANG_ENABLE_CIR
+     if (UseCIR)
+@@ -100,9 +108,17 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
+       return std::make_unique<cir::EmitObjAction>();
+ #endif
+     return std::make_unique<EmitObjAction>();
++#ifdef GLASSJAR_TINY
++  case ExtractAPI: Action = "ExtractAPI"; break;
++#else
+   case ExtractAPI:
+     return std::make_unique<ExtractAPIAction>();
++#endif
++#ifdef GLASSJAR_TINY
++  case FixIt: Action = "FixIt"; break;
++#else
+   case FixIt:                  return std::make_unique<FixItAction>();
++#endif
+   case GenerateModule:
+     return std::make_unique<GenerateModuleFromModuleMapAction>();
+   case GenerateModuleInterface:
+@@ -112,13 +128,21 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
+   case GenerateHeaderUnit:
+     return std::make_unique<GenerateHeaderUnitAction>();
+   case GeneratePCH:            return std::make_unique<GeneratePCHAction>();
++#ifdef GLASSJAR_TINY
++  case GenerateInterfaceStubs: Action = "GenerateInterfaceStubs"; break;
++#else
+   case GenerateInterfaceStubs:
+     return std::make_unique<GenerateInterfaceStubsAction>();
++#endif
+   case InitOnly:               return std::make_unique<InitOnlyAction>();
+   case ParseSyntaxOnly:        return std::make_unique<SyntaxOnlyAction>();
+   case ModuleFileInfo:         return std::make_unique<DumpModuleInfoAction>();
+   case VerifyPCH:              return std::make_unique<VerifyPCHAction>();
++#ifdef GLASSJAR_TINY
++  case TemplightDump: Action = "TemplightDump"; break;
++#else
+   case TemplightDump:          return std::make_unique<TemplightDumpAction>();
++#endif
+ 
+   case PluginAction: {
+     for (const FrontendPluginRegistry::entry &Plugin :
+@@ -148,8 +172,16 @@ CreateFrontendBaseAction(CompilerInstance &CI) {
+     return std::make_unique<PrintPreprocessedAction>();
+   }
+ 
++#ifdef GLASSJAR_TINY
++  case RewriteMacros: Action = "RewriteMacros"; break;
++#else
+   case RewriteMacros:          return std::make_unique<RewriteMacrosAction>();
++#endif
++#ifdef GLASSJAR_TINY
++  case RewriteTest: Action = "RewriteTest"; break;
++#else
+   case RewriteTest:            return std::make_unique<RewriteTestAction>();
++#endif
+ #if CLANG_ENABLE_OBJC_REWRITER
+   case RewriteObjC:            return std::make_unique<RewriteObjCAction>();
+ #else
+@@ -185,6 +217,7 @@ CreateFrontendAction(CompilerInstance &CI) {
+   if (CI.getLangOpts().HLSL)
+     Act = std::make_unique<HLSLFrontendAction>(std::move(Act));
+ 
++#ifndef GLASSJAR_TINY // glassjar: compile, PCH and IntelliSense actions only.
+   if (FEOpts.FixAndRecompile) {
+     Act = std::make_unique<FixItRecompile>(std::move(Act));
+   }
+@@ -206,6 +239,7 @@ CreateFrontendAction(CompilerInstance &CI) {
+   if (!FEOpts.ASTMergeFiles.empty())
+     Act = std::make_unique<ASTMergeAction>(std::move(Act),
+                                             FEOpts.ASTMergeFiles);
++#endif
+ 
+   return Act;
+ }
+diff --git a/clang/lib/Index/IndexSymbol.cpp b/clang/lib/Index/IndexSymbol.cpp
+index c3cbc03cf9..c6ddabd0c5 100644
+--- a/clang/lib/Index/IndexSymbol.cpp
++++ b/clang/lib/Index/IndexSymbol.cpp
+@@ -187,7 +187,7 @@ SymbolInfo index::getSymbolInfo(const Decl *D) {
+       break;
+     case Decl::EnumConstant:
+       Info.Kind = SymbolKind::EnumConstant; break;
+-    case Decl::ObjCInterface:
++    case Decl::ObjCInterface: GLASSJAR_NEVER_BUILT_DECL(ObjCInterface)
+     case Decl::ObjCImplementation: {
+       Info.Kind = SymbolKind::Class;
+       Info.Lang = SymbolLanguage::ObjC;
+@@ -202,7 +202,7 @@ SymbolInfo index::getSymbolInfo(const Decl *D) {
+       Info.Kind = SymbolKind::Protocol;
+       Info.Lang = SymbolLanguage::ObjC;
+       break;
+-    case Decl::ObjCCategory:
++    case Decl::ObjCCategory: GLASSJAR_NEVER_BUILT_DECL(ObjCCategory)
+     case Decl::ObjCCategoryImpl: {
+       Info.Kind = SymbolKind::Extension;
+       Info.Lang = SymbolLanguage::ObjC;
+@@ -240,7 +240,7 @@ SymbolInfo index::getSymbolInfo(const Decl *D) {
+           Info.Properties |= (SymbolPropertySet)SymbolProperty::GKInspectable;
+       }
+       break;
+-    case Decl::ObjCIvar:
++    case Decl::ObjCIvar: GLASSJAR_NEVER_BUILT_DECL(ObjCIvar)
+       Info.Kind = SymbolKind::Field;
+       Info.Lang = SymbolLanguage::ObjC;
+       checkForIBOutlets(D, Info.Properties);
+diff --git a/clang/lib/Index/USRGeneration.cpp b/clang/lib/Index/USRGeneration.cpp
+index 08835ea786..ea991f59cf 100644
+--- a/clang/lib/Index/USRGeneration.cpp
++++ b/clang/lib/Index/USRGeneration.cpp
+@@ -437,7 +437,7 @@ void USRGenerator::VisitObjCContainerDecl(const ObjCContainerDecl *D,
+     default:
+       llvm_unreachable("Invalid ObjC container.");
+     case Decl::ObjCInterface:
+-    case Decl::ObjCImplementation:
++    case Decl::ObjCImplementation: GLASSJAR_NEVER_BUILT_DECL(ObjCImplementation)
+       GenObjCClass(D->getName(), GetExternalSourceContainer(D),
+                    GetExternalSourceContainer(CatD));
+       break;
+diff --git a/clang/lib/Parse/ParseOpenACC.cpp b/clang/lib/Parse/ParseOpenACC.cpp
+index b79a956d51..7b86ff1ca2 100644
+--- a/clang/lib/Parse/ParseOpenACC.cpp
++++ b/clang/lib/Parse/ParseOpenACC.cpp
+@@ -1645,6 +1645,8 @@ Parser::ParseOpenACCAfterRoutineStmt(OpenACCDirectiveParseInfo &DirInfo) {
+ Parser::DeclGroupPtrTy
+ Parser::ParseOpenACCDirectiveDecl(AccessSpecifier &AS, ParsedAttributes &Attrs,
+                                   DeclSpec::TST TagType, Decl *TagDecl) {
++  if (!getLangOpts().OpenACC) // glassjar: constant in a build without OpenACC.
++    return nullptr;
+   assert(Tok.is(tok::annot_pragma_openacc) && "expected OpenACC Start Token");
+ 
+   ParsingOpenACCDirectiveRAII DirScope(*this);
+@@ -1664,6 +1666,8 @@ Parser::ParseOpenACCDirectiveDecl(AccessSpecifier &AS, ParsedAttributes &Attrs,
+ }
+ 
+ StmtResult Parser::ParseOpenACCDirectiveStmt() {
++  if (!getLangOpts().OpenACC) // glassjar: constant in a build without OpenACC.
++    return StmtError();
+   assert(Tok.is(tok::annot_pragma_openacc) && "expected OpenACC Start Token");
+ 
+   ParsingOpenACCDirectiveRAII DirScope(*this);
+diff --git a/clang/lib/Parse/ParseOpenMP.cpp b/clang/lib/Parse/ParseOpenMP.cpp
+index 01fd05961f..b97fa8b2cc 100644
+--- a/clang/lib/Parse/ParseOpenMP.cpp
++++ b/clang/lib/Parse/ParseOpenMP.cpp
+@@ -1955,6 +1955,8 @@ void Parser::ParseOMPEndDeclareTargetDirective(OpenMPDirectiveKind BeginDKind,
+ Parser::DeclGroupPtrTy Parser::ParseOpenMPDeclarativeDirectiveWithExtDecl(
+     AccessSpecifier &AS, ParsedAttributes &Attrs, bool Delayed,
+     DeclSpec::TST TagType, Decl *Tag) {
++  if (!getLangOpts().OpenMP) // glassjar: constant in a build without OpenMP.
++    return nullptr;
+   assert(Tok.isOneOf(tok::annot_pragma_openmp, tok::annot_attr_openmp) &&
+          "Not an OpenMP directive!");
+   ParsingOpenMPDirectiveRAII DirScope(*this);
+@@ -2512,6 +2514,8 @@ StmtResult Parser::ParseOpenMPInformationalDirective(
+ 
+ StmtResult Parser::ParseOpenMPDeclarativeOrExecutableDirective(
+     ParsedStmtContext StmtCtx, bool ReadDirectiveWithinMetadirective) {
++  if (!getLangOpts().OpenMP) // glassjar: constant in a build without OpenMP.
++    return StmtError();
+   if (!ReadDirectiveWithinMetadirective)
+     assert(Tok.isOneOf(tok::annot_pragma_openmp, tok::annot_attr_openmp) &&
+            "Not an OpenMP directive!");
+diff --git a/clang/lib/Sema/SemaAPINotes.cpp b/clang/lib/Sema/SemaAPINotes.cpp
+index 0d8d0faa59..d9e0e34743 100644
+--- a/clang/lib/Sema/SemaAPINotes.cpp
++++ b/clang/lib/Sema/SemaAPINotes.cpp
+@@ -984,6 +984,9 @@ UnwindTagContext(TagDecl *DC, api_notes::APINotesManager &APINotes) {
+ void Sema::ProcessAPINotes(Decl *D) {
+   if (!D)
+     return;
++#ifdef GLASSJAR_TINY
++  return; // glassjar: API notes are never loaded.
++#endif
+ 
+   auto *DC = D->getDeclContext();
+   // Globals.
+diff --git a/clang/lib/Sema/SemaAvailability.cpp b/clang/lib/Sema/SemaAvailability.cpp
+index 3624e487a7..dcf0278abf 100644
+--- a/clang/lib/Sema/SemaAvailability.cpp
++++ b/clang/lib/Sema/SemaAvailability.cpp
+@@ -757,7 +757,7 @@ bool isBodyLikeChildStmt(const Stmt *S, const Stmt *Parent) {
+     return cast<ForStmt>(Parent)->getBody() == S;
+   case Stmt::CXXForRangeStmtClass:
+     return cast<CXXForRangeStmt>(Parent)->getBody() == S;
+-  case Stmt::ObjCForCollectionStmtClass:
++  case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+     return cast<ObjCForCollectionStmt>(Parent)->getBody() == S;
+   case Stmt::CaseStmtClass:
+   case Stmt::DefaultStmtClass:
+diff --git a/clang/lib/Sema/SemaCodeComplete.cpp b/clang/lib/Sema/SemaCodeComplete.cpp
+index aa93507ab5..63d8b8a8b3 100644
+--- a/clang/lib/Sema/SemaCodeComplete.cpp
++++ b/clang/lib/Sema/SemaCodeComplete.cpp
+@@ -4298,18 +4298,18 @@ CXCursorKind clang::getCursorKindForDecl(const Decl *D) {
+     return CXCursor_FieldDecl;
+   case Decl::Function:
+     return CXCursor_FunctionDecl;
+-  case Decl::ObjCCategory:
++  case Decl::ObjCCategory: GLASSJAR_NEVER_BUILT_DECL(ObjCCategory)
+     return CXCursor_ObjCCategoryDecl;
+-  case Decl::ObjCCategoryImpl:
++  case Decl::ObjCCategoryImpl: GLASSJAR_NEVER_BUILT_DECL(ObjCCategoryImpl)
+     return CXCursor_ObjCCategoryImplDecl;
+-  case Decl::ObjCImplementation:
++  case Decl::ObjCImplementation: GLASSJAR_NEVER_BUILT_DECL(ObjCImplementation)
+     return CXCursor_ObjCImplementationDecl;
+ 
+-  case Decl::ObjCInterface:
++  case Decl::ObjCInterface: GLASSJAR_NEVER_BUILT_DECL(ObjCInterface)
+     return CXCursor_ObjCInterfaceDecl;
+-  case Decl::ObjCIvar:
++  case Decl::ObjCIvar: GLASSJAR_NEVER_BUILT_DECL(ObjCIvar)
+     return CXCursor_ObjCIvarDecl;
+-  case Decl::ObjCMethod:
++  case Decl::ObjCMethod: GLASSJAR_NEVER_BUILT_DECL(ObjCMethod)
+     return cast<ObjCMethodDecl>(D)->isInstanceMethod()
+                ? CXCursor_ObjCInstanceMethodDecl
+                : CXCursor_ObjCClassMethodDecl;
+@@ -4321,9 +4321,9 @@ CXCursorKind clang::getCursorKindForDecl(const Decl *D) {
+     return CXCursor_Destructor;
+   case Decl::CXXConversion:
+     return CXCursor_ConversionFunction;
+-  case Decl::ObjCProperty:
++  case Decl::ObjCProperty: GLASSJAR_NEVER_BUILT_DECL(ObjCProperty)
+     return CXCursor_ObjCPropertyDecl;
+-  case Decl::ObjCProtocol:
++  case Decl::ObjCProtocol: GLASSJAR_NEVER_BUILT_DECL(ObjCProtocol)
+     return CXCursor_ObjCProtocolDecl;
+   case Decl::ParmVar:
+     return CXCursor_ParmDecl;
+@@ -4370,7 +4370,7 @@ CXCursorKind clang::getCursorKindForDecl(const Decl *D) {
+   case Decl::UsingEnum:
+     return CXCursor_EnumDecl;
+ 
+-  case Decl::ObjCPropertyImpl:
++  case Decl::ObjCPropertyImpl: GLASSJAR_NEVER_BUILT_DECL(ObjCPropertyImpl)
+     switch (cast<ObjCPropertyImplDecl>(D)->getPropertyImplementation()) {
+     case ObjCPropertyImplDecl::Dynamic:
+       return CXCursor_ObjCDynamicDecl;
+@@ -4383,7 +4383,7 @@ CXCursorKind clang::getCursorKindForDecl(const Decl *D) {
+   case Decl::Import:
+     return CXCursor_ModuleImportDecl;
+ 
+-  case Decl::ObjCTypeParam:
++  case Decl::ObjCTypeParam: GLASSJAR_NEVER_BUILT_DECL(ObjCTypeParam)
+     return CXCursor_TemplateTypeParameter;
+ 
+   case Decl::Concept:
+diff --git a/clang/lib/Sema/SemaDecl.cpp b/clang/lib/Sema/SemaDecl.cpp
+index d67220a2f1..df538060ca 100644
+--- a/clang/lib/Sema/SemaDecl.cpp
++++ b/clang/lib/Sema/SemaDecl.cpp
+@@ -19707,10 +19707,10 @@ void Sema::ActOnFields(Scope *S, SourceLocation RecLoc, Decl *EnclosingDecl,
+     ObjCContainerDecl *DC = cast<ObjCContainerDecl>(EnclosingDecl);
+     switch (DC->getKind()) {
+     default: break;
+-    case Decl::ObjCCategory:
++    case Decl::ObjCCategory: GLASSJAR_NEVER_BUILT_DECL(ObjCCategory)
+       Context.ResetObjCLayout(cast<ObjCCategoryDecl>(DC)->getClassInterface());
+       break;
+-    case Decl::ObjCImplementation:
++    case Decl::ObjCImplementation: GLASSJAR_NEVER_BUILT_DECL(ObjCImplementation)
+       Context.
+         ResetObjCLayout(cast<ObjCImplementationDecl>(DC)->getClassInterface());
+       break;
+diff --git a/clang/lib/Sema/SemaDeclObjC.cpp b/clang/lib/Sema/SemaDeclObjC.cpp
+index 53ff818a2a..73eb9816a7 100644
+--- a/clang/lib/Sema/SemaDeclObjC.cpp
++++ b/clang/lib/Sema/SemaDeclObjC.cpp
+@@ -3825,17 +3825,17 @@ static void DiagnoseRetainableFlexibleArrayMember(Sema &S,
+ 
+ SemaObjC::ObjCContainerKind SemaObjC::getObjCContainerKind() const {
+   switch (SemaRef.CurContext->getDeclKind()) {
+-  case Decl::ObjCInterface:
++  case Decl::ObjCInterface: GLASSJAR_NEVER_BUILT_DECL(ObjCInterface)
+     return SemaObjC::OCK_Interface;
+-  case Decl::ObjCProtocol:
++  case Decl::ObjCProtocol: GLASSJAR_NEVER_BUILT_DECL(ObjCProtocol)
+     return SemaObjC::OCK_Protocol;
+-  case Decl::ObjCCategory:
++  case Decl::ObjCCategory: GLASSJAR_NEVER_BUILT_DECL(ObjCCategory)
+     if (cast<ObjCCategoryDecl>(SemaRef.CurContext)->IsClassExtension())
+       return SemaObjC::OCK_ClassExtension;
+     return SemaObjC::OCK_Category;
+-  case Decl::ObjCImplementation:
++  case Decl::ObjCImplementation: GLASSJAR_NEVER_BUILT_DECL(ObjCImplementation)
+     return SemaObjC::OCK_Implementation;
+-  case Decl::ObjCCategoryImpl:
++  case Decl::ObjCCategoryImpl: GLASSJAR_NEVER_BUILT_DECL(ObjCCategoryImpl)
+     return SemaObjC::OCK_CategoryImplementation;
+ 
+   default:
+diff --git a/clang/lib/Sema/SemaExceptionSpec.cpp b/clang/lib/Sema/SemaExceptionSpec.cpp
+index 6208d6679d..8d6b2ed7fd 100644
+--- a/clang/lib/Sema/SemaExceptionSpec.cpp
++++ b/clang/lib/Sema/SemaExceptionSpec.cpp
+@@ -1262,7 +1262,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
+     // possibility.
+   case Expr::ObjCArrayLiteralClass:
+   case Expr::ObjCDictionaryLiteralClass:
+-  case Expr::ObjCBoxedExprClass:
++  case Expr::ObjCBoxedExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCBoxedExpr)
+     return CT_Can;
+ 
+     // Many other things have subexpressions, so we have to test those.
+@@ -1619,7 +1619,7 @@ CanThrowResult Sema::canThrow(const Stmt *S) {
+ 
+   case Stmt::SYCLUniqueStableNameExprClass:
+     return CT_Cannot;
+-  case Stmt::OpenACCAsteriskSizeExprClass:
++  case Stmt::OpenACCAsteriskSizeExprClass: GLASSJAR_NEVER_BUILT_STMT(OpenACCAsteriskSizeExpr)
+     return CT_Cannot;
+   case Stmt::NoStmtClass:
+     llvm_unreachable("Invalid class for statement");
+diff --git a/clang/lib/Sema/SemaExpr.cpp b/clang/lib/Sema/SemaExpr.cpp
+index 4d787a60eb..f7666cd49f 100644
+--- a/clang/lib/Sema/SemaExpr.cpp
++++ b/clang/lib/Sema/SemaExpr.cpp
+@@ -3332,7 +3332,7 @@ ExprResult Sema::BuildDeclarationNameExpr(
+     llvm_unreachable("invalid value decl kind");
+ 
+   // These shouldn't make it here.
+-  case Decl::ObjCAtDefsField:
++  case Decl::ObjCAtDefsField: GLASSJAR_NEVER_BUILT_DECL(ObjCAtDefsField)
+     llvm_unreachable("forming non-member reference to ivar?");
+ 
+   // Enum constants are always r-values and never references.
+@@ -12059,7 +12059,7 @@ static bool isObjCObjectLiteral(ExprResult &E) {
+   case Stmt::ObjCArrayLiteralClass:
+   case Stmt::ObjCDictionaryLiteralClass:
+   case Stmt::ObjCStringLiteralClass:
+-  case Stmt::ObjCBoxedExprClass:
++  case Stmt::ObjCBoxedExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCBoxedExpr)
+     return true;
+   default:
+     // Note that ObjCBoolLiteral is NOT an object literal!
+diff --git a/clang/lib/Sema/SemaExprObjC.cpp b/clang/lib/Sema/SemaExprObjC.cpp
+index 5dbd64b65c..577c56e3db 100644
+--- a/clang/lib/Sema/SemaExprObjC.cpp
++++ b/clang/lib/Sema/SemaExprObjC.cpp
+@@ -5208,16 +5208,16 @@ SemaObjC::ObjCLiteralKind SemaObjC::CheckLiteralKind(Expr *FromE) {
+   switch (FromE->getStmtClass()) {
+   default:
+     break;
+-  case Stmt::ObjCStringLiteralClass:
++  case Stmt::ObjCStringLiteralClass: GLASSJAR_NEVER_BUILT_STMT(ObjCStringLiteral)
+     // "string literal"
+     return LK_String;
+-  case Stmt::ObjCArrayLiteralClass:
++  case Stmt::ObjCArrayLiteralClass: GLASSJAR_NEVER_BUILT_STMT(ObjCArrayLiteral)
+     // "array literal"
+     return LK_Array;
+-  case Stmt::ObjCDictionaryLiteralClass:
++  case Stmt::ObjCDictionaryLiteralClass: GLASSJAR_NEVER_BUILT_STMT(ObjCDictionaryLiteral)
+     // "dictionary literal"
+     return LK_Dictionary;
+-  case Stmt::BlockExprClass:
++  case Stmt::BlockExprClass: GLASSJAR_NEVER_BUILT_STMT(BlockExpr)
+     return LK_Block;
+   case Stmt::ObjCBoxedExprClass: {
+     Expr *Inner = cast<ObjCBoxedExpr>(FromE)->getSubExpr()->IgnoreParens();
+diff --git a/clang/lib/Sema/TreeTransform.h b/clang/lib/Sema/TreeTransform.h
+index 5a1e5fedba..424b103980 100644
+--- a/clang/lib/Sema/TreeTransform.h
++++ b/clang/lib/Sema/TreeTransform.h
+@@ -4368,7 +4368,9 @@ StmtResult TreeTransform<Derived>::TransformStmt(Stmt *S, StmtDiscardKind SDK) {
+   // Transform individual statement nodes
+   // Pass SDK into statements that can produce a value
+ #define STMT(Node, Parent)                                              \
+-  case Stmt::Node##Class: return getDerived().Transform##Node(cast<Node>(S));
++  case Stmt::Node##Class:                                               \
++    GLASSJAR_NEVER_BUILT_STMT(Node)                                     \
++    return getDerived().Transform##Node(cast<Node>(S));
+ #define VALUESTMT(Node, Parent)                                         \
+   case Stmt::Node##Class:                                               \
+     return getDerived().Transform##Node(cast<Node>(S), SDK);
+@@ -4422,7 +4424,9 @@ ExprResult TreeTransform<Derived>::TransformExpr(Expr *E) {
+ #define STMT(Node, Parent) case Stmt::Node##Class: break;
+ #define ABSTRACT_STMT(Stmt)
+ #define EXPR(Node, Parent)                                              \
+-    case Stmt::Node##Class: return getDerived().Transform##Node(cast<Node>(E));
++    case Stmt::Node##Class:                                             \
++      GLASSJAR_NEVER_BUILT_STMT(Node)                                   \
++      return getDerived().Transform##Node(cast<Node>(E));
+ #include "clang/AST/StmtNodes.inc"
+   }
+ 
+diff --git a/clang/lib/Serialization/ASTCommon.cpp b/clang/lib/Serialization/ASTCommon.cpp
+index 69db02f2ef..de3b7dc29a 100644
+--- a/clang/lib/Serialization/ASTCommon.cpp
++++ b/clang/lib/Serialization/ASTCommon.cpp
+@@ -344,7 +344,7 @@ serialization::getDefinitiveDeclContext(const DeclContext *DC) {
+   case Decl::ObjCImplementation:
+     return DC;
+ 
+-  case Decl::ObjCProtocol:
++  case Decl::ObjCProtocol: GLASSJAR_NEVER_BUILT_DECL(ObjCProtocol)
+     if (const ObjCProtocolDecl *Def
+           = cast<ObjCProtocolDecl>(DC)->getDefinition())
+       return Def;
+@@ -353,7 +353,7 @@ serialization::getDefinitiveDeclContext(const DeclContext *DC) {
+   // FIXME: These are defined in one place, but properties in class extensions
+   // end up being back-patched into the main interface. See
+   // SemaObjC::HandlePropertyInClassExtension for the offending code.
+-  case Decl::ObjCInterface:
++  case Decl::ObjCInterface: GLASSJAR_NEVER_BUILT_DECL(ObjCInterface)
+     return nullptr;
+ 
+   default:
+diff --git a/clang/lib/StaticAnalyzer/Core/BugReporter.cpp b/clang/lib/StaticAnalyzer/Core/BugReporter.cpp
+index 4c066520b6..0c509bdbb4 100644
+--- a/clang/lib/StaticAnalyzer/Core/BugReporter.cpp
++++ b/clang/lib/StaticAnalyzer/Core/BugReporter.cpp
+@@ -717,7 +717,7 @@ getEnclosingStmtLocation(const Stmt *S, const LocationContext *LC,
+         if (cast<IfStmt>(Parent)->getCond() != S)
+           return PathDiagnosticLocation(S, SMgr, LC);
+         break;
+-      case Stmt::ObjCForCollectionStmtClass:
++      case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+         if (cast<ObjCForCollectionStmt>(Parent)->getBody() == S)
+           return PathDiagnosticLocation(S, SMgr, LC);
+         break;
+diff --git a/clang/lib/StaticAnalyzer/Core/CallEvent.cpp b/clang/lib/StaticAnalyzer/Core/CallEvent.cpp
+index f6c3a8e326..ecf0388a65 100644
+--- a/clang/lib/StaticAnalyzer/Core/CallEvent.cpp
++++ b/clang/lib/StaticAnalyzer/Core/CallEvent.cpp
+@@ -1114,10 +1114,10 @@ ObjCMessageKind ObjCMethodCall::getMessageKind() const {
+ 
+       ObjCMessageKind K;
+       switch (Syntactic->getStmtClass()) {
+-      case Stmt::ObjCPropertyRefExprClass:
++      case Stmt::ObjCPropertyRefExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCPropertyRefExpr)
+         K = OCM_PropertyAccess;
+         break;
+-      case Stmt::ObjCSubscriptRefExprClass:
++      case Stmt::ObjCSubscriptRefExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCSubscriptRefExpr)
+         K = OCM_Subscript;
+         break;
+       default:
+diff --git a/clang/lib/StaticAnalyzer/Core/ExprEngine.cpp b/clang/lib/StaticAnalyzer/Core/ExprEngine.cpp
+index a6a96b594f..fe25ef05db 100644
+--- a/clang/lib/StaticAnalyzer/Core/ExprEngine.cpp
++++ b/clang/lib/StaticAnalyzer/Core/ExprEngine.cpp
+@@ -1885,7 +1885,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
+       llvm_unreachable("Should be pruned from CFG");
+ 
+     case Stmt::ObjCSubscriptRefExprClass:
+-    case Stmt::ObjCPropertyRefExprClass:
++    case Stmt::ObjCPropertyRefExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCPropertyRefExpr)
+       llvm_unreachable("These are handled by PseudoObjectExpr");
+ 
+     case Stmt::GNUNullExprClass: {
+@@ -2111,7 +2111,7 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
+       Bldr.addNodes(Dst);
+       break;
+ 
+-    case Stmt::BlockExprClass:
++    case Stmt::BlockExprClass: GLASSJAR_NEVER_BUILT_STMT(BlockExpr)
+       Bldr.takeNodes(Pred);
+       VisitBlockExpr(cast<BlockExpr>(S), Pred, Dst);
+       Bldr.addNodes(Dst);
+@@ -2356,19 +2356,19 @@ void ExprEngine::Visit(const Stmt *S, ExplodedNode *Pred,
+       Bldr.addNodes(Dst);
+       break;
+ 
+-    case Stmt::ObjCIvarRefExprClass:
++    case Stmt::ObjCIvarRefExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCIvarRefExpr)
+       Bldr.takeNodes(Pred);
+       VisitLvalObjCIvarRefExpr(cast<ObjCIvarRefExpr>(S), Pred, Dst);
+       Bldr.addNodes(Dst);
+       break;
+ 
+-    case Stmt::ObjCForCollectionStmtClass:
++    case Stmt::ObjCForCollectionStmtClass: GLASSJAR_NEVER_BUILT_STMT(ObjCForCollectionStmt)
+       Bldr.takeNodes(Pred);
+       VisitObjCForCollectionStmt(cast<ObjCForCollectionStmt>(S), Pred, Dst);
+       Bldr.addNodes(Dst);
+       break;
+ 
+-    case Stmt::ObjCMessageExprClass:
++    case Stmt::ObjCMessageExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCMessageExpr)
+       Bldr.takeNodes(Pred);
+       VisitObjCMessage(cast<ObjCMessageExpr>(S), Pred, Dst);
+       Bldr.addNodes(Dst);
+diff --git a/clang/lib/StaticAnalyzer/Core/PlistDiagnostics.cpp b/clang/lib/StaticAnalyzer/Core/PlistDiagnostics.cpp
+index 4ea6208d54..f0584453e3 100644
+--- a/clang/lib/StaticAnalyzer/Core/PlistDiagnostics.cpp
++++ b/clang/lib/StaticAnalyzer/Core/PlistDiagnostics.cpp
+@@ -725,7 +725,7 @@ void PlistDiagnostics::FlushDiagnosticsImpl(
+           case Decl::CXXMethod:
+             declKind = "C++ method";
+             break;
+-          case Decl::ObjCMethod:
++          case Decl::ObjCMethod: GLASSJAR_NEVER_BUILT_DECL(ObjCMethod)
+             declKind = "Objective-C method";
+             break;
+           case Decl::Function:
+diff --git a/clang/lib/StaticAnalyzer/Core/SValBuilder.cpp b/clang/lib/StaticAnalyzer/Core/SValBuilder.cpp
+index a6f4463852..b2b1d262aa 100644
+--- a/clang/lib/StaticAnalyzer/Core/SValBuilder.cpp
++++ b/clang/lib/StaticAnalyzer/Core/SValBuilder.cpp
+@@ -377,7 +377,7 @@ std::optional<SVal> SValBuilder::getConstantVal(const Expr *E) {
+   case Stmt::IntegerLiteralClass:
+     return makeIntVal(cast<IntegerLiteral>(E));
+ 
+-  case Stmt::ObjCBoolLiteralExprClass:
++  case Stmt::ObjCBoolLiteralExprClass: GLASSJAR_NEVER_BUILT_STMT(ObjCBoolLiteralExpr)
+     return makeBoolVal(cast<ObjCBoolLiteralExpr>(E));
+ 
+   case Stmt::CXXNullPtrLiteralExprClass:
+diff --git a/clang/tools/driver/cc1_main.cpp b/clang/tools/driver/cc1_main.cpp
+index 1adb217014..6168576fd7 100644
+--- a/clang/tools/driver/cc1_main.cpp
++++ b/clang/tools/driver/cc1_main.cpp
+@@ -30,7 +30,11 @@
+ #include "llvm/ADT/Statistic.h"
+ #include "llvm/ADT/StringExtras.h"
+ #include "llvm/Config/llvm-config.h"
++#ifndef GLASSJAR_O0_ONLY
++// glassjar: this header exists to force every LLVM pass to be linked in (for
++// plugins); the -O0-only build wants the opposite.
+ #include "llvm/LinkAllPasses.h"
++#endif
+ #include "llvm/MC/MCSubtargetInfo.h"
+ #include "llvm/MC/TargetRegistry.h"
+ #include "llvm/Option/Arg.h"
+diff --git a/clang/tools/driver/driver.cpp b/clang/tools/driver/driver.cpp
+index 490136961e..025c015b4c 100644
+--- a/clang/tools/driver/driver.cpp
++++ b/clang/tools/driver/driver.cpp
+@@ -224,11 +224,13 @@ static int ExecuteCC1Tool(SmallVectorImpl<const char *> &ArgV,
+   void *GetExecutablePathVP = (void *)(intptr_t)GetExecutablePath;
+   if (Tool == "-cc1")
+     return cc1_main(ArrayRef(ArgV).slice(1), ArgV[0], GetExecutablePathVP);
++#ifndef GLASSJAR_TINY
+   if (Tool == "-cc1as")
+     return cc1as_main(ArrayRef(ArgV).slice(2), ArgV[0], GetExecutablePathVP);
+   if (Tool == "-cc1gen-reproducer")
+     return cc1gen_reproducer_main(ArrayRef(ArgV).slice(2), ArgV[0],
+                                   GetExecutablePathVP, ToolContext);
++#endif
+   // Reject unknown tools.
+   llvm::errs()
+       << "error: unknown integrated tool '" << Tool << "'. "
+@@ -273,6 +275,12 @@ int clang_main(int Argc, char **Argv, const llvm::ToolContext &ToolContext) {
+     auto EnableSandbox = llvm::sys::sandbox::scopedEnable();
+     return ExecuteCC1Tool(Args, ToolContext, VFS);
+   }
++#ifdef GLASSJAR_TINY
++  // glassjar: the engine builds its own -cc1 command lines, so the gcc-style
++  // driver (toolchains, option translation, job execution) is not linked in.
++  llvm::errs() << "error: this build of clang only provides 'clang -cc1'\n";
++  return 1;
++#endif
+ 
+   // Handle options that need handling before the real command line parsing in
+   // Driver::BuildCompilation()
+diff --git a/lld/wasm/InputFiles.cpp b/lld/wasm/InputFiles.cpp
+index 387b5eb10b..51ee5b7d35 100644
+--- a/lld/wasm/InputFiles.cpp
++++ b/lld/wasm/InputFiles.cpp
+@@ -98,6 +98,10 @@ InputFile *createObjectFile(MemoryBufferRef mb, StringRef archiveName,
+   }
+ 
+   assert(magic == file_magic::bitcode);
++#ifdef GLASSJAR_TINY
++  fatal(toString(mb.getBufferIdentifier()) +
++        ": LLVM bitcode (LTO) is not supported by this build of wasm-ld");
++#endif
+   return make<BitcodeFile>(mb, archiveName, offsetInArchive, lazy);
+ }
+ 
+diff --git a/lld/wasm/SymbolTable.cpp b/lld/wasm/SymbolTable.cpp
+index 91677b34ea..f85c27ab0b 100644
+--- a/lld/wasm/SymbolTable.cpp
++++ b/lld/wasm/SymbolTable.cpp
+@@ -81,6 +81,9 @@ void SymbolTable::addFile(InputFile *file, StringRef symName) {
+ void SymbolTable::compileBitcodeFiles() {
+   // Prevent further LTO objects being included
+   BitcodeFile::doneLTO = true;
++#ifdef GLASSJAR_TINY
++  return; // glassjar: no LTO; createObjectFile rejects bitcode inputs.
++#endif
+ 
+   // Compile bitcode files and replace bitcode symbols.
+   lto.reset(new BitcodeCompiler);
+diff --git a/llvm/include/llvm/BinaryFormat/Magic.h b/llvm/include/llvm/BinaryFormat/Magic.h
+index 11922d843a..5dfa1df330 100644
+--- a/llvm/include/llvm/BinaryFormat/Magic.h
++++ b/llvm/include/llvm/BinaryFormat/Magic.h
+@@ -9,6 +9,9 @@
+ #ifndef LLVM_BINARYFORMAT_MAGIC_H
+ #define LLVM_BINARYFORMAT_MAGIC_H
+ 
++#ifdef GLASSJAR_TINY
++#include "llvm/ADT/StringRef.h"
++#endif
+ #include "llvm/Support/Compiler.h"
+ #include <system_error>
+ 
+@@ -73,7 +76,21 @@ private:
+ };
+ 
+ /// Identify the type of a binary file based on how magical it is.
++#ifdef GLASSJAR_TINY
++// glassjar: this toolchain reads WebAssembly objects and archives of them.
++// Folding every other format to "unknown" here lets LTO drop their readers.
++LLVM_ABI file_magic identify_magic_any(StringRef magic);
++inline file_magic identify_magic(StringRef magic) {
++  file_magic Type = identify_magic_any(magic);
++  if (Type == file_magic::wasm_object)
++    return file_magic::wasm_object;
++  if (Type == file_magic::archive)
++    return file_magic::archive;
++  return file_magic::unknown;
++}
++#else
+ LLVM_ABI file_magic identify_magic(StringRef magic);
++#endif
+ 
+ /// Get and identify \a path's type based on its content.
+ ///
+diff --git a/llvm/include/llvm/Target/TargetMachine.h b/llvm/include/llvm/Target/TargetMachine.h
+index d0fd483a8d..f308832fd9 100644
+--- a/llvm/include/llvm/Target/TargetMachine.h
++++ b/llvm/include/llvm/Target/TargetMachine.h
+@@ -286,7 +286,13 @@ public:
+   TLSModel::Model getTLSModel(const GlobalValue *GV) const;
+ 
+   /// Returns the optimization level: None, Less, Default, or Aggressive.
++#ifdef GLASSJAR_O0_ONLY
++  // glassjar: this build only compiles at -O0, so the optimizing code
++  // generator passes are unreachable and LTO can drop them.
++  CodeGenOptLevel getOptLevel() const { return CodeGenOptLevel::None; }
++#else
+   CodeGenOptLevel getOptLevel() const { return OptLevel; }
++#endif
+ 
+   /// Overrides the optimization level.
+   void setOptLevel(CodeGenOptLevel Level) { OptLevel = Level; }
+diff --git a/llvm/include/llvm/TargetParser/Triple.h b/llvm/include/llvm/TargetParser/Triple.h
+index 9c83abeeb3..c3e4ea9c8d 100644
+--- a/llvm/include/llvm/TargetParser/Triple.h
++++ b/llvm/include/llvm/TargetParser/Triple.h
+@@ -414,7 +414,14 @@ public:
+   /// @{
+ 
+   /// Get the parsed architecture type of this triple.
++#ifdef GLASSJAR_TINY
++  // glassjar: a WebAssembly-only toolchain. Telling the optimizer so lets LTO
++  // drop every other target's code paths (clang targets and builtins, object
++  // formats, ABI lowering) from every switch on the architecture.
++  ArchType getArch() const { return Arch == wasm64 ? wasm64 : wasm32; }
++#else
+   ArchType getArch() const { return Arch; }
++#endif
+ 
+   /// get the parsed subarchitecture type for this triple.
+   SubArchType getSubArch() const { return SubArch; }
+@@ -440,7 +447,11 @@ public:
+   LLVM_ABI VersionTuple getEnvironmentVersion() const;
+ 
+   /// Get the object format for this triple.
++#ifdef GLASSJAR_TINY
++  ObjectFormatType getObjectFormat() const { return Wasm; }
++#else
+   ObjectFormatType getObjectFormat() const { return ObjectFormat; }
++#endif
+ 
+   /// Parse the version number from the OS name component of the triple, if
+   /// present.
+diff --git a/llvm/lib/BinaryFormat/Magic.cpp b/llvm/lib/BinaryFormat/Magic.cpp
+index bd378337ed..01d7d99fec 100644
+--- a/llvm/lib/BinaryFormat/Magic.cpp
++++ b/llvm/lib/BinaryFormat/Magic.cpp
+@@ -30,7 +30,11 @@ static bool startswith(StringRef Magic, const char (&S)[N]) {
+ }
+ 
+ /// Identify the magic in magic.
++#ifdef GLASSJAR_TINY
++file_magic llvm::identify_magic_any(StringRef Magic) {
++#else
+ file_magic llvm::identify_magic(StringRef Magic) {
++#endif
+   if (Magic.size() < 4)
+     return file_magic::unknown;
+   switch ((unsigned char)Magic[0]) {
+diff --git a/llvm/lib/CodeGen/CodeGen.cpp b/llvm/lib/CodeGen/CodeGen.cpp
+index 3550eea139..1c15b7d1b0 100644
+--- a/llvm/lib/CodeGen/CodeGen.cpp
++++ b/llvm/lib/CodeGen/CodeGen.cpp
+@@ -18,6 +18,59 @@ using namespace llvm;
+ 
+ /// initializeCodeGen - Initialize all passes linked into the CodeGen library.
+ void llvm::initializeCodeGen(PassRegistry &Registry) {
++#ifdef GLASSJAR_O0_ONLY
++  // glassjar: only the passes the -O0 WebAssembly pipeline schedules (the
++  // "Pass Arguments" line of -mllvm -debug-pass=Structure). Registering a pass
++  // keeps its code alive, so the optimizing passes are left out.
++  initializeAssignmentTrackingAnalysisPass(Registry);
++  initializeAtomicExpandLegacyPass(Registry);
++  initializeCallBrPreparePass(Registry);
++  initializeExpandIRInstsLegacyPassPass(Registry);
++  initializeExpandPostRALegacyPass(Registry);
++  initializeFEntryInserterLegacyPass(Registry);
++  initializeFinalizeISelPass(Registry);
++  initializeFixupStatepointCallerSavedLegacyPass(Registry);
++  initializeGCModuleInfoPass(Registry);
++  initializeIndirectBrExpandLegacyPassPass(Registry);
++  initializeLibcallLoweringInfoWrapperPass(Registry);
++  initializeLiveDebugValuesLegacyPass(Registry);
++  initializeLocalStackSlotPassPass(Registry);
++  initializeLowerGlobalDtorsLegacyPassPass(Registry);
++  initializeLowerIntrinsicsPass(Registry);
++  initializeMachineDominatorTreeWrapperPassPass(Registry);
++  initializeMachineLoopInfoWrapperPassPass(Registry);
++  initializeMachineModuleInfoWrapperPassPass(Registry);
++  initializeMachineOptimizationRemarkEmitterPassPass(Registry);
++  initializeMachineSanitizerBinaryMetadataLegacyPass(Registry);
++  initializePEILegacyPass(Registry);
++  initializePHIEliminationPass(Registry);
++  initializePreISelIntrinsicLoweringLegacyPassPass(Registry);
++  initializeRemoveRedundantDebugValuesLegacyPass(Registry);
++  initializeSafeStackLegacyPassPass(Registry);
++  initializeShadowStackGCLoweringPass(Registry);
++  initializeStackFrameLayoutAnalysisLegacyPass(Registry);
++  initializeStackProtectorPass(Registry);
++  initializeTargetPassConfigPass(Registry);
++  initializeTwoAddressInstructionLegacyPassPass(Registry);
++  initializeUnreachableBlockElimLegacyPassPass(Registry);
++  initializeWasmEHPreparePass(Registry);
++  initializeWinEHPreparePass(Registry);
++  initializeXRayInstrumentationLegacyPass(Registry);
++  // Analyses those passes require, which the full list registered as a side
++  // effect of passes left out here.
++  initializeAssumptionCacheTrackerPass(Registry);
++  initializeExpandReductionsPass(Registry);
++  initializeLazyMachineBlockFrequencyInfoPassPass(Registry);
++  initializeMachineBranchProbabilityInfoWrapperPassPass(Registry);
++  initializeMachineDominanceFrontierPass(Registry);
++  initializePostInlineEntryExitInstrumenterPass(Registry);
++  initializeProfileSummaryInfoWrapperPassPass(Registry);
++  initializeRuntimeLibraryInfoWrapperPass(Registry);
++  initializeScalarizeMaskedMemIntrinLegacyPassPass(Registry);
++  initializeTargetLibraryInfoWrapperPassPass(Registry);
++  initializeTargetTransformInfoWrapperPassPass(Registry);
++  initializeVerifierLegacyPassPass(Registry);
++#else
+   initializeAssignmentTrackingAnalysisPass(Registry);
+   initializeAtomicExpandLegacyPass(Registry);
+   initializeBasicBlockPathCloningPass(Registry);
+@@ -149,4 +202,5 @@ void llvm::initializeCodeGen(PassRegistry &Registry) {
+   initializeWasmEHPreparePass(Registry);
+   initializeWinEHPreparePass(Registry);
+   initializeXRayInstrumentationLegacyPass(Registry);
++#endif
+ }
+diff --git a/llvm/lib/Passes/PassBuilderPipelines.cpp b/llvm/lib/Passes/PassBuilderPipelines.cpp
+index 1584d30875..d0e2005588 100644
+--- a/llvm/lib/Passes/PassBuilderPipelines.cpp
++++ b/llvm/lib/Passes/PassBuilderPipelines.cpp
+@@ -2318,6 +2318,7 @@ PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
+ 
+   ModulePassManager MPM;
+ 
++#ifndef GLASSJAR_O0_ONLY // glassjar: no profiling passes in the -O0-only build.
+   // Perform pseudo probe instrumentation in O0 mode. This is for the
+   // consistency between different build modes. For example, a LTO build can be
+   // mixed with an O0 prelink and an O2 postlink. Loading a sample profile in
+@@ -2332,6 +2333,7 @@ PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
+         /*RunProfileGen=*/(PGOOpt->Action == PGOOptions::IRInstr),
+         /*IsCS=*/false, PGOOpt->AtomicCounterUpdate, PGOOpt->ProfileFile,
+         PGOOpt->ProfileRemappingFile);
++#endif
+ 
+   // Instrument function entry and exit before all inlining.
+   MPM.addPass(createModuleToFunctionPassAdaptor(
+@@ -2339,6 +2341,7 @@ PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
+ 
+   invokePipelineStartEPCallbacks(MPM, Level);
+ 
++#ifndef GLASSJAR_O0_ONLY
+   if (PGOOpt && PGOOpt->DebugInfoForProfiling)
+     MPM.addPass(createModuleToFunctionPassAdaptor(AddDiscriminatorsPass()));
+ 
+@@ -2354,6 +2357,7 @@ PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
+     // RequireAnalysisPass for PSI before subsequent non-module passes.
+     MPM.addPass(RequireAnalysisPass<ProfileSummaryAnalysis, Module>());
+   }
++#endif
+ 
+   invokePipelineEarlySimplificationEPCallbacks(MPM, Level, Phase);
+ 
+@@ -2364,12 +2368,14 @@ PassBuilder::buildO0DefaultPipeline(OptimizationLevel Level,
+   MPM.addPass(AlwaysInlinerPass(
+       /*InsertLifetimeIntrinsics=*/false));
+ 
++#ifndef GLASSJAR_O0_ONLY
+   if (PTO.MergeFunctions)
+     MPM.addPass(MergeFunctionsPass());
+ 
+   if (EnableMatrix)
+     MPM.addPass(
+         createModuleToFunctionPassAdaptor(LowerMatrixIntrinsicsPass(true)));
++#endif
+ 
+   if (!CGSCCOptimizerLateEPCallbacks.empty()) {
+     CGSCCPassManager CGPM;
+diff --git a/llvm/lib/Support/Process.cpp b/llvm/lib/Support/Process.cpp
+index 57bcc2d116..56a70e4a27 100644
+--- a/llvm/lib/Support/Process.cpp
++++ b/llvm/lib/Support/Process.cpp
+@@ -107,10 +107,19 @@ static bool coreFilesPrevented = !LLVM_ENABLE_CRASH_DUMPS;
+ 
+ bool Process::AreCoreFilesPrevented() { return coreFilesPrevented; }
+ 
++#ifdef GLASSJAR_PGO_GEN
++extern "C" int __llvm_profile_write_file(void);
++#endif
++
+ [[noreturn]] void Process::Exit(int RetCode, bool NoCleanup) {
+   if (CrashRecoveryContext *CRC = CrashRecoveryContext::GetCurrent())
+     CRC->HandleExit(RetCode);
+ 
++#ifdef GLASSJAR_PGO_GEN
++  // glassjar: wasm-ld leaves through _Exit, which skips the atexit handler that
++  // writes the profile of an instrumented (-fprofile-generate) build.
++  __llvm_profile_write_file();
++#endif
+   if (NoCleanup)
+     ExitNoCleanup(RetCode);
+   else
+diff --git a/llvm/lib/Support/Signals.cpp b/llvm/lib/Support/Signals.cpp
+index b7cbc61838..f4e71d6176 100644
+--- a/llvm/lib/Support/Signals.cpp
++++ b/llvm/lib/Support/Signals.cpp
+@@ -369,3 +369,13 @@ void llvm::sys::DisableSystemDialogsOnCrash() {}
+ #elif defined(_WIN32)
+ #include "Windows/Signals.inc"
+ #endif
++
++#if defined(__wasi__) && defined(GLASSJAR_PGO_GEN)
++// glassjar: WASI has no definitions for these two. Normally their only callers
++// are optimized away; an instrumented (-fprofile-generate) build keeps them.
++static bool findModulesAndOffsets(void **, int, const char **, intptr_t *,
++                                  const char *, StringSaver &) {
++  return false;
++}
++static bool printMarkupContext(raw_ostream &, const char *) { return false; }
++#endif

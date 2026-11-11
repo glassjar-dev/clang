@@ -31,15 +31,21 @@ WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -Wl,-z,stack-size=8388608,--stack-first"
 # Some of the host APIs that are statically required by LLVM (notably threading) are dynamically
 # never used. An LTO build removes imports of these APIs, simplifying deployment.
 WASI_CFLAGS_LLVM="${WASI_CFLAGS_LLVM} -flto"
-WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -flto -Wl,--strip-all"
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} -flto"
+# Variants: extra compile and link flags, and whether to strip names at link time
+# (a build that keeps them can be measured function by function; see harness/sizes.py).
+WASI_CFLAGS_LLVM="${WASI_CFLAGS_LLVM} ${EXTRA_CFLAGS}"
+WASI_LDFLAGS_LLVM="${WASI_LDFLAGS_LLVM} ${LINK_STRIP--Wl,--strip-all} ${EXTRA_LDFLAGS}"
+BUILD_DIR="${BUILD_DIR:-llvm-build}"
+mkdir -p "${BUILD_DIR}"
 
-cat >Toolchain-WASI.cmake <<END
+cat >"${BUILD_DIR}/Toolchain-WASI.cmake" <<END
 include(${WASI_SDK_PATH}/share/cmake/wasi-sdk-p1.cmake)
 set(CMAKE_C_FLAGS "${WASI_CFLAGS}")
 set(CMAKE_CXX_FLAGS "${WASI_CFLAGS}")
 set(CMAKE_EXE_LINKER_FLAGS "${WASI_LDFLAGS}")
 END
-cat >Toolchain-WASI-LLVM.cmake <<END
+cat >"${BUILD_DIR}/Toolchain-WASI-LLVM.cmake" <<END
 include(${WASI_SDK_PATH}/share/cmake/wasi-sdk-p1.cmake)
 set(CMAKE_C_FLAGS "${WASI_CFLAGS_LLVM}")
 set(CMAKE_CXX_FLAGS "${WASI_CFLAGS_LLVM}")
@@ -73,12 +79,11 @@ if ! [ -f llvm-tblgen-build/bin/llvm-tblgen -a -f llvm-tblgen-build/bin/clang-tb
   cmake --build llvm-tblgen-build --target llvm-tblgen --target clang-tblgen
 fi
 
-mkdir -p ${BUILD_DIR:-llvm-build}
-cmake -B ${BUILD_DIR:-llvm-build} -S llvm-src/llvm \
-  -DCMAKE_TOOLCHAIN_FILE=../Toolchain-WASI-LLVM.cmake \
+cmake -B ${BUILD_DIR} -S llvm-src/llvm \
+  -DCMAKE_TOOLCHAIN_FILE=$(pwd)/${BUILD_DIR}/Toolchain-WASI-LLVM.cmake \
   -DLLVM_CCACHE_BUILD=ON \
   -DLLVM_NATIVE_TOOL_DIR=$(pwd)/llvm-tblgen-build/bin \
-  -DCMAKE_BUILD_TYPE=MinSizeRel \
+  -DCMAKE_BUILD_TYPE=${BUILD_TYPE:-MinSizeRel} \
   -DLLVM_ENABLE_ASSERTIONS=ON \
   -DLLVM_BUILD_SHARED_LIBS=OFF \
   -DLLVM_ENABLE_PIC=OFF \
@@ -205,4 +210,4 @@ cmake -B ${BUILD_DIR:-llvm-build} -S llvm-src/llvm \
 # The "all" target still contains far too much stuff, even given all the options above, so build
 # only Clang/LLD, explicitly. For the same reason using the "install" target is infeasible.
 # I spent a while trying and it leads nowhere.
-cmake --build ${BUILD_DIR:-llvm-build} --target llvm-driver
+cmake --build ${BUILD_DIR} --target llvm-driver ${NINJA_ARGS:+-- ${NINJA_ARGS}}
