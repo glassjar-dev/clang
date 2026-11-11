@@ -96,4 +96,7 @@ python3 harness/sizes.py build-tiny/bin/llvm 'OpenMP|OMP'   # how much code matc
 python3 harness/who.py build-tiny/bin/llvm '^llvm::GVNPass::runImpl'   # what keeps it alive
 ```
 
+[EXPERIMENTS.md](EXPERIMENTS.md) records what was tried on the way, including what did not
+pay off.
+
 The sysroot (`llvm-resources.tar.gz`) is unchanged from YoWASP's release.
